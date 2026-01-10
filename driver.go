@@ -7,7 +7,28 @@ import (
 )
 
 // Driver is the interface that database-specific drivers must implement.
-// It abstracts away database-specific migration tracking and locking.
+//
+// Driver abstracts database-specific migration tracking, locking, and
+// transaction management. This allows Queen to support multiple databases
+// (PostgreSQL, MySQL, SQLite, etc.) without changing the core library.
+//
+// # Implementing a Driver
+//
+// To implement a driver for a new database:
+//
+//  1. Implement all Driver interface methods
+//  2. Create a migrations tracking table in Init()
+//  3. Use database-specific locking (advisory locks, named locks, etc.)
+//  4. Handle transactions properly in Exec()
+//
+// See drivers/postgres/postgres.go for a reference implementation.
+//
+// # Thread Safety
+//
+// Driver implementations must be safe for concurrent use by multiple
+// goroutines. The Queen instance will handle locking to prevent concurrent
+// migrations, but the driver should still be thread-safe for Status() and
+// Validate() operations.
 type Driver interface {
 	// Init initializes the driver and creates the migrations tracking table if needed.
 	// This should be called before any other operations.
@@ -26,8 +47,14 @@ type Driver interface {
 	Remove(ctx context.Context, version string) error
 
 	// Lock acquires an exclusive lock to prevent concurrent migrations.
-	// If the lock cannot be acquired within the specified timeout, it returns ErrLockTimeout.
-	// The lock is automatically released when the context is cancelled.
+	//
+	// If the lock cannot be acquired within the specified timeout, it returns
+	// ErrLockTimeout. The lock must be held until Unlock() is called.
+	//
+	// Implementation notes:
+	// - Use database-specific locking (PostgreSQL advisory locks, MySQL named locks, etc.)
+	// - The lock should be exclusive to prevent concurrent migration runs
+	// - Consider using a unique lock identifier based on the migrations table name
 	Lock(ctx context.Context, timeout time.Duration) error
 
 	// Unlock releases the migration lock.

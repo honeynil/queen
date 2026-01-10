@@ -2,7 +2,7 @@
 
 **Database migrations for Go.**
 
-Queen is a database migration library that lets you define migrations in code, not separate files. It supports both SQL and Go function migrations, with built-in testing helpers and a simple, honey API.
+Queen is a database migration library that lets you define migrations in code, not separate files. It supports both SQL and Go function migrations, with built-in testing helpers and a simple, idiomatic API.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/honeynil/queen.svg)](https://pkg.go.dev/github.com/honeynil/queen)
 [![Go Report Card](https://goreportcard.com/badge/github.com/honeynil/queen)](https://goreportcard.com/report/github.com/honeynil/queen)
@@ -12,8 +12,8 @@ Queen is a database migration library that lets you define migrations in code, n
 
 ## Features
 
-- **Migrations in code** - No separate `.sql` files cluttering your repo
-- **Hybrid approach** - Use SQL strings, Go functions, or mix both
+- **Migrations in code** - Define migrations as Go code, not separate `.sql` files
+- **Flexible syntax** - Use SQL strings in code, Go functions, or mix both
 - **Testing helpers** - Built-in support for testing your migrations
 - **Natural sorting** - Smart version ordering: "1" < "2" < "10" < "100", "user_1" < "user_10"
 - **Flexible versioning** - Use sequential numbers, prefixes, or any naming scheme

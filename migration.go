@@ -14,43 +14,82 @@ import (
 type MigrationFunc func(ctx context.Context, tx *sql.Tx) error
 
 // Migration represents a single database migration.
-// It can be defined using SQL strings, Go functions, or both.
 //
-// For SQL migrations, use UpSQL and DownSQL fields.
-// For Go function migrations, use UpFunc and DownFunc fields.
+// A migration can be defined using SQL strings (UpSQL/DownSQL) or
+// Go functions (UpFunc/DownFunc). You can also mix both approaches
+// in the same migration.
 //
-// The Version field must be unique across all migrations.
-// Queen uses natural sorting, so "001", "002", "010" work correctly.
-// You can also use prefixes like "user_001", "post_001" for modular organization.
+// # Version and Name
+//
+// Version must be unique across all migrations. Queen uses natural sorting,
+// so "1", "2", "10" sort correctly. You can use prefixes for organization:
+// "users_001", "posts_001".
+//
+// Name should be a human-readable description like "create_users" or
+// "add_email_index".
+//
+// # SQL Migrations
+//
+// For simple schema changes, use UpSQL and DownSQL:
+//
+//	queen.M{
+//	    Version: "001",
+//	    Name:    "create_users",
+//	    UpSQL:   "CREATE TABLE users (id INT)",
+//	    DownSQL: "DROP TABLE users",
+//	}
+//
+// # Go Function Migrations
+//
+// For complex logic that can't be expressed in SQL, use UpFunc and DownFunc:
+//
+//	queen.M{
+//	    Version:        "002",
+//	    Name:           "migrate_data",
+//	    ManualChecksum: "v1",
+//	    UpFunc: func(ctx context.Context, tx *sql.Tx) error {
+//	        // Your migration logic here
+//	        return nil
+//	    },
+//	}
+//
+// IMPORTANT: When using UpFunc/DownFunc, always set ManualChecksum to track
+// changes. Update it whenever you modify the function (e.g., "v1" -> "v2").
+//
+// # Checksums
+//
+// Queen automatically calculates checksums for SQL migrations. For Go function
+// migrations, you must provide ManualChecksum. This detects when applied
+// migrations have been modified, which can indicate a problem.
 type Migration struct {
-	// Version is a unique identifier for this migration.
+	// Version uniquely identifies this migration.
 	// Examples: "001", "002", "user_001", "v1.0.0"
 	Version string
 
-	// Name is a human-readable description of the migration.
+	// Name describes what this migration does.
 	// Examples: "create_users", "add_email_index"
 	Name string
 
-	// UpSQL is the SQL statement to apply the migration.
-	// Used for simple SQL migrations.
+	// UpSQL applies the migration using SQL.
+	// Leave empty when using UpFunc.
 	UpSQL string
 
-	// DownSQL is the SQL statement to rollback the migration.
+	// DownSQL rolls back the migration using SQL.
 	// Optional but recommended for safe rollbacks.
 	DownSQL string
 
-	// UpFunc is a Go function to apply the migration.
-	// Used for complex migrations that need programmatic logic.
+	// UpFunc applies the migration using Go code.
+	// Use for complex logic that can't be expressed in SQL.
 	UpFunc MigrationFunc
 
-	// DownFunc is a Go function to rollback the migration.
+	// DownFunc rolls back the migration using Go code.
 	// Optional but recommended for safe rollbacks.
 	DownFunc MigrationFunc
 
-	// ManualChecksum is an optional manual checksum for Go function migrations.
-	// When using UpFunc/DownFunc, set this to track migration changes.
-	// Example: "v1", "v2", or descriptive like "normalize-emails-v1"
-	// If not set, checksum validation will be skipped for Go functions.
+	// ManualChecksum tracks changes to function migrations.
+	// Required when using UpFunc/DownFunc for validation.
+	// Examples: "v1", "v2", "normalize-emails-v1"
+	// Update this whenever you modify the function.
 	ManualChecksum string
 
 	// Lazy-loaded checksum cache. sync.Once pointer prevents copylocks warning
@@ -69,8 +108,7 @@ type Migration struct {
 //	})
 type M = Migration
 
-// Validate checks if the migration is valid.
-// A migration must have either UpSQL or UpFunc defined.
+// Validate ensures Version, Name, and at least one Up method are defined.
 func (m *Migration) Validate() error {
 	if m.Version == "" {
 		return ErrInvalidMigration
@@ -92,10 +130,8 @@ func (m *Migration) Validate() error {
 // migrations without an explicit ManualChecksum value.
 const noChecksumMarker = "no-checksum-go-func"
 
-// Checksum returns a unique hash of the migration content.
-// For SQL migrations, it hashes UpSQL and DownSQL.
-// For Go function migrations with ManualChecksum, it uses that value.
-// For Go function migrations without ManualChecksum, it returns a special marker.
+// Checksum returns a hash for validation.
+// Uses ManualChecksum if set, calculates from SQL otherwise, or returns a marker for Go functions.
 func (m *Migration) Checksum() string {
 	if m.checksumOnce == nil {
 		m.checksumOnce = &sync.Once{}
@@ -121,14 +157,13 @@ func (m *Migration) Checksum() string {
 	return m.checksum
 }
 
-// HasRollback returns true if the migration has a down migration.
+// HasRollback checks if DownSQL or DownFunc is defined.
 func (m *Migration) HasRollback() bool {
 	return m.DownSQL != "" || m.DownFunc != nil
 }
 
-// IsDestructive returns true if the migration contains potentially destructive operations.
-// This checks for DROP TABLE, DROP DATABASE, TRUNCATE, etc.
-// Only checks DownSQL, as Up migrations are assumed to be constructive.
+// IsDestructive checks DownSQL for destructive keywords: DROP TABLE, DROP DATABASE, TRUNCATE, etc.
+// Up migrations are assumed constructive and not checked.
 func (m *Migration) IsDestructive() bool {
 	if m.DownSQL == "" {
 		return false
@@ -152,7 +187,7 @@ func (m *Migration) IsDestructive() bool {
 	return false
 }
 
-// executeUp executes the migration's Up operation within a transaction.
+// executeUp runs UpFunc or UpSQL within the transaction.
 func (m *Migration) executeUp(ctx context.Context, tx *sql.Tx) error {
 	if m.UpFunc != nil {
 		return m.UpFunc(ctx, tx)
@@ -166,7 +201,7 @@ func (m *Migration) executeUp(ctx context.Context, tx *sql.Tx) error {
 	return ErrInvalidMigration
 }
 
-// executeDown executes the migration's Down operation within a transaction.
+// executeDown runs DownFunc or DownSQL within the transaction.
 func (m *Migration) executeDown(ctx context.Context, tx *sql.Tx) error {
 	if m.DownFunc != nil {
 		return m.DownFunc(ctx, tx)

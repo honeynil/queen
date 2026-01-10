@@ -6,14 +6,42 @@ import (
 )
 
 // TestHelper provides testing utilities for migrations.
+//
+// TestHelper wraps a Queen instance with test-specific helpers that
+// automatically fail tests on errors instead of returning them. This
+// reduces boilerplate in migration tests.
+//
+// The TestHelper automatically cleans up (closes the Queen instance)
+// when the test ends using t.Cleanup().
+//
+// # Usage
+//
+// Create a TestHelper with NewTest and use its Must* methods:
+//
+//	func TestMigrations(t *testing.T) {
+//	    db := setupTestDB(t)
+//	    driver := postgres.New(db)
+//	    q := queen.NewTest(t, driver)
+//
+//	    q.MustAdd(queen.M{...})
+//	    q.MustUp()
+//	    q.MustValidate()
+//	}
+//
+// Or use TestUpDown to test both up and down migrations:
+//
+//	func TestMigrations(t *testing.T) {
+//	    q := queen.NewTest(t, driver)
+//	    q.MustAdd(queen.M{...})
+//	    q.TestUpDown() // Applies then rolls back all migrations
+//	}
 type TestHelper struct {
 	*Queen
 	t   *testing.T
 	ctx context.Context
 }
 
-// NewTest creates a new Queen instance for testing.
-// It uses the provided driver and will clean up automatically when the test ends.
+// NewTest creates a Queen instance with automatic cleanup.
 //
 // Usage:
 //
@@ -49,14 +77,23 @@ func NewTest(t *testing.T, driver Driver) *TestHelper {
 	}
 }
 
-// TestUpDown tests that migrations can be applied and rolled back successfully.
-// This validates that your Down migrations work correctly.
+// TestUpDown verifies migrations can be applied and rolled back.
+//
+// Recommended for testing because it ensures:
+// - Up migrations execute without errors
+// - Down migrations execute without errors
+// - Database returns to original state after rollback
 //
 // Usage:
 //
 //	func TestMigrations(t *testing.T) {
 //	    q := queen.NewTest(t, driver)
-//	    q.MustAdd(queen.M{...})
+//	    q.MustAdd(queen.M{
+//	        Version: "001",
+//	        Name:    "create_users",
+//	        UpSQL:   "CREATE TABLE users (id INT)",
+//	        DownSQL: "DROP TABLE users",
+//	    })
 //
 //	    q.TestUpDown() // Tests both up and down
 //	}
