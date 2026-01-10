@@ -66,11 +66,10 @@ import (
 //
 // The driver is thread-safe for concurrent reads, but SQLite's database-level
 // locking means only one write operation (migration) can occur at a time.
-// This is handled automatically by the BEGIN EXCLUSIVE transaction.
+// This is handled automatically by PRAGMA locking_mode=EXCLUSIVE.
 type Driver struct {
 	db        *sql.DB
 	tableName string
-	lockTx    *sql.Tx // Holds the exclusive transaction for locking
 }
 
 // New creates a new SQLite driver.
@@ -106,7 +105,6 @@ func NewWithTableName(db *sql.DB, tableName string) *Driver {
 	return &Driver{
 		db:        db,
 		tableName: tableName,
-		lockTx:    nil,
 	}
 }
 
@@ -208,30 +206,32 @@ func (d *Driver) Remove(ctx context.Context, version string) error {
 
 // Lock acquires an exclusive database lock to prevent concurrent migrations.
 //
-// SQLite uses database-level locking. This driver uses BEGIN EXCLUSIVE to
-// acquire an exclusive lock on the entire database. This prevents any other
+// SQLite uses database-level locking. This driver uses PRAGMA locking_mode=EXCLUSIVE
+// to acquire an exclusive lock on the entire database file. This prevents any other
 // connections from writing to the database until the lock is released.
 //
-// The lock is held in a separate transaction (d.lockTx) and is released when
-// Unlock() is called.
-//
-// Important: Unlike PostgreSQL and MySQL where locks are separate from
-// migration transactions, SQLite's locking transaction must remain open
-// for the entire migration process.
+// The lock is connection-based (similar to PostgreSQL advisory locks) rather than
+// transaction-based, allowing individual migration transactions to be created and
+// committed independently.
 //
 // If the lock cannot be acquired within the timeout, returns queen.ErrLockTimeout.
 func (d *Driver) Lock(ctx context.Context, timeout time.Duration) error {
-	// SQLite busy_timeout must be in milliseconds
+	// Set busy_timeout for lock acquisition attempts
 	_, err := d.db.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout = %d", timeout.Milliseconds()))
 	if err != nil {
 		return fmt.Errorf("failed to set busy_timeout: %w", err)
 	}
 
-	// Begin EXCLUSIVE transaction to lock the database
-	tx, err := d.db.BeginTx(ctx, &sql.TxOptions{
-		Isolation: sql.LevelSerializable,
-		ReadOnly:  false,
-	})
+	// Set EXCLUSIVE locking mode - this locks the database file
+	// preventing other connections from acquiring locks
+	_, err = d.db.ExecContext(ctx, "PRAGMA locking_mode = EXCLUSIVE")
+	if err != nil {
+		return fmt.Errorf("failed to set locking mode: %w", err)
+	}
+
+	// Force the lock to be acquired immediately by starting and committing a write transaction
+	// This ensures we actually acquire the lock now, not lazily later
+	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		if strings.Contains(err.Error(), "database is locked") {
 			return queen.ErrLockTimeout
@@ -239,8 +239,8 @@ func (d *Driver) Lock(ctx context.Context, timeout time.Duration) error {
 		return fmt.Errorf("failed to begin lock transaction: %w", err)
 	}
 
-	// Execute a write to force exclusive lock acquisition
-	_, err = tx.ExecContext(ctx, "SELECT 1")
+	// Perform a write operation to force exclusive lock acquisition
+	_, err = tx.ExecContext(ctx, "CREATE TEMP TABLE IF NOT EXISTS _queen_lock_test (id INTEGER)")
 	if err != nil {
 		_ = tx.Rollback()
 		if strings.Contains(err.Error(), "database is locked") {
@@ -249,27 +249,39 @@ func (d *Driver) Lock(ctx context.Context, timeout time.Duration) error {
 		return fmt.Errorf("failed to acquire exclusive lock: %w", err)
 	}
 
-	d.lockTx = tx
+	// Commit the transaction - we don't need to keep it open
+	// The EXCLUSIVE locking mode remains in effect for the connection
+	err = tx.Commit()
+	if err != nil {
+		return fmt.Errorf("failed to commit lock transaction: %w", err)
+	}
+
 	return nil
 }
 
 // Unlock releases the migration lock.
 //
-// This commits the exclusive transaction, allowing other connections to
+// This resets the locking mode to NORMAL, allowing other connections to
 // write to the database.
 //
 // This should be called in a defer statement after acquiring the lock.
 // It's safe to call even if the lock wasn't acquired.
 func (d *Driver) Unlock(ctx context.Context) error {
-	if d.lockTx == nil {
-		return nil
+	// Reset locking mode to NORMAL
+	_, err := d.db.ExecContext(ctx, "PRAGMA locking_mode = NORMAL")
+	if err != nil {
+		return fmt.Errorf("failed to reset locking mode: %w", err)
 	}
 
-	err := d.lockTx.Commit()
-	d.lockTx = nil
-
+	// Execute a transaction to force the locking mode change to take effect
+	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("failed to release lock: %w", err)
+		return fmt.Errorf("failed to begin unlock transaction: %w", err)
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		return fmt.Errorf("failed to commit unlock transaction: %w", err)
 	}
 
 	return nil
@@ -304,11 +316,6 @@ func (d *Driver) Exec(ctx context.Context, fn func(*sql.Tx) error) error {
 // If you're using a file-based database (not :memory:), the database file
 // persists after closing. For in-memory databases, all data is lost.
 func (d *Driver) Close() error {
-	if d.lockTx != nil {
-		_ = d.lockTx.Rollback()
-		d.lockTx = nil
-	}
-
 	return d.db.Close()
 }
 
