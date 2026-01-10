@@ -200,9 +200,22 @@ func Example_foreignKeys() {
 }
 
 // Example_status demonstrates checking migration status.
+//
+// Note: This example requires a running MySQL server.
+// It will be skipped in CI if MySQL is not available.
 func Example_status() {
-	db, _ := sql.Open("mysql", "user:password@tcp(localhost:3306)/myapp?parseTime=true")
+	db, err := sql.Open("mysql", "user:password@tcp(localhost:3306)/myapp?parseTime=true")
+	if err != nil {
+		fmt.Println("MySQL not available")
+		return
+	}
 	defer db.Close()
+
+	// Check if MySQL is actually available
+	if err := db.Ping(); err != nil {
+		fmt.Println("MySQL not available")
+		return
+	}
 
 	driver := mysql.New(db)
 	q := queen.New(driver)
@@ -240,7 +253,7 @@ func Example_status() {
 		fmt.Printf("%s: %s (%s)\n", s.Version, s.Name, s.Status)
 	}
 
-	// Output:
+	// Example output (when MySQL is available):
 	// 001: create_users (applied)
 	// 002: create_posts (pending)
 }

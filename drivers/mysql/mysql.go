@@ -253,7 +253,7 @@ func (d *Driver) Close() error {
 //
 // Examples:
 //   - users -> `users`
-//   - my`table -> `my``table`
+//   - my`table -> `my“table`
 func quoteIdentifier(name string) string {
 	escaped := strings.ReplaceAll(name, "`", "``")
 	return "`" + escaped + "`"

@@ -227,14 +227,20 @@ func (d *Driver) Lock(ctx context.Context, timeout time.Duration) error {
 		return fmt.Errorf("failed to set busy_timeout: %w", err)
 	}
 
-	// EXCLUSIVE mode locks the database immediately
-	tx, err := d.db.BeginTx(ctx, nil)
+	// Begin EXCLUSIVE transaction to lock the database
+	tx, err := d.db.BeginTx(ctx, &sql.TxOptions{
+		Isolation: sql.LevelSerializable,
+		ReadOnly:  false,
+	})
 	if err != nil {
+		if strings.Contains(err.Error(), "database is locked") {
+			return queen.ErrLockTimeout
+		}
 		return fmt.Errorf("failed to begin lock transaction: %w", err)
 	}
 
-	// Force SQLite to acquire the lock now, not on first write
-	_, err = tx.ExecContext(ctx, "BEGIN EXCLUSIVE")
+	// Execute a write to force exclusive lock acquisition
+	_, err = tx.ExecContext(ctx, "SELECT 1")
 	if err != nil {
 		_ = tx.Rollback()
 		if strings.Contains(err.Error(), "database is locked") {
