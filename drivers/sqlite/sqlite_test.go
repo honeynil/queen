@@ -71,9 +71,6 @@ func TestDriverCreation(t *testing.T) {
 		if driver.tableName != "queen_migrations" {
 			t.Errorf("driver.tableName = %q; want %q", driver.tableName, "queen_migrations")
 		}
-		if driver.lockTx != nil {
-			t.Error("driver.lockTx should be nil initially")
-		}
 	})
 
 	t.Run("NewWithTableName creates driver with custom table name", func(t *testing.T) {
@@ -83,9 +80,6 @@ func TestDriverCreation(t *testing.T) {
 		}
 		if driver.tableName != "custom_migrations" {
 			t.Errorf("driver.tableName = %q; want %q", driver.tableName, "custom_migrations")
-		}
-		if driver.lockTx != nil {
-			t.Error("driver.lockTx should be nil initially")
 		}
 	})
 }
@@ -325,9 +319,14 @@ func TestLocking(t *testing.T) {
 		t.Fatalf("Lock() failed: %v", err)
 	}
 
-	// Verify lockTx is set
-	if driver.lockTx == nil {
-		t.Error("lockTx should be set after Lock()")
+	// Verify lock is working by checking locking mode
+	var lockingMode string
+	err = db.QueryRowContext(ctx, "PRAGMA locking_mode").Scan(&lockingMode)
+	if err != nil {
+		t.Fatalf("failed to query locking mode: %v", err)
+	}
+	if lockingMode != "exclusive" {
+		t.Errorf("locking_mode = %q; want %q", lockingMode, "exclusive")
 	}
 
 	// Release lock
@@ -335,9 +334,13 @@ func TestLocking(t *testing.T) {
 		t.Fatalf("Unlock() failed: %v", err)
 	}
 
-	// Verify lockTx is cleared
-	if driver.lockTx != nil {
-		t.Error("lockTx should be nil after Unlock()")
+	// Verify lock is released by checking locking mode is back to normal
+	err = db.QueryRowContext(ctx, "PRAGMA locking_mode").Scan(&lockingMode)
+	if err != nil {
+		t.Fatalf("failed to query locking mode: %v", err)
+	}
+	if lockingMode != "normal" {
+		t.Errorf("locking_mode = %q; want %q after unlock", lockingMode, "normal")
 	}
 
 	// Test double unlock (should be safe)
