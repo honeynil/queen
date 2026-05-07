@@ -10,7 +10,6 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/honeynil/queen"
-	"github.com/honeynil/queen/cli"
 	"github.com/honeynil/queen/drivers/base"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -610,7 +609,7 @@ func TestInit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("migrations table was not created: %v", err)
 	}
-	if tableName != cli.DefaultTableName {
+	if tableName != "queen_migrations" {
 		t.Errorf("table name = %q; want %q", tableName, "queen_migrations")
 	}
 
