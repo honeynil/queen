@@ -7,9 +7,58 @@ on:
     branches: [ main ]
 
 jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      shared: ${{ steps.filter.outputs.shared }}
+      postgres: ${{ steps.filter.outputs.postgres }}
+      mysql: ${{ steps.filter.outputs.mysql }}
+      sqlite: ${{ steps.filter.outputs.sqlite }}
+      clickhouse: ${{ steps.filter.outputs.clickhouse }}
+      cockroachdb: ${{ steps.filter.outputs.cockroachdb }}
+      mssql: ${{ steps.filter.outputs.mssql }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+
+    - name: Detect changed paths
+      id: filter
+      uses: dorny/paths-filter@v3
+      with:
+        filters: |
+          shared:
+            - 'go.mod'
+            - 'go.sum'
+            - 'Makefile'
+            - '.github/workflows/**'
+            - '*.go'
+            - 'cli/**'
+            - 'internal/**'
+            - 'tests/integration/**'
+            - 'drivers/base/**'
+            - 'drivers/mock/**'
+          postgres:
+            - 'drivers/postgres/**'
+          mysql:
+            - 'drivers/mysql/**'
+          sqlite:
+            - 'drivers/sqlite/**'
+          clickhouse:
+            - 'drivers/clickhouse/**'
+          cockroachdb:
+            - 'drivers/cockroachdb/**'
+          mssql:
+            - 'drivers/mssql/**'
+
   test:
     name: Test
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.shared == 'true' || needs.changes.outputs.postgres == 'true' || needs.changes.outputs.mysql == 'true' || needs.changes.outputs.sqlite == 'true' || needs.changes.outputs.clickhouse == 'true' || needs.changes.outputs.cockroachdb == 'true' || needs.changes.outputs.mssql == 'true'
 
     services:
       postgres:
@@ -27,10 +76,10 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version: '1.25'
 
@@ -45,8 +94,38 @@ jobs:
     - name: Download dependencies
       run: go mod download
 
+    - name: Select test packages
+      id: packages
+      env:
+        SHARED_CHANGED: ${{ needs.changes.outputs.shared }}
+        POSTGRES_CHANGED: ${{ needs.changes.outputs.postgres }}
+        MYSQL_CHANGED: ${{ needs.changes.outputs.mysql }}
+        SQLITE_CHANGED: ${{ needs.changes.outputs.sqlite }}
+        CLICKHOUSE_CHANGED: ${{ needs.changes.outputs.clickhouse }}
+        COCKROACHDB_CHANGED: ${{ needs.changes.outputs.cockroachdb }}
+        MSSQL_CHANGED: ${{ needs.changes.outputs.mssql }}
+      run: |
+        if [ "$SHARED_CHANGED" = "true" ]; then
+          echo "packages=./..." >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        packages=""
+        [ "$POSTGRES_CHANGED" = "true" ] && packages="$packages ./drivers/postgres"
+        [ "$MYSQL_CHANGED" = "true" ] && packages="$packages ./drivers/mysql"
+        [ "$SQLITE_CHANGED" = "true" ] && packages="$packages ./drivers/sqlite"
+        [ "$CLICKHOUSE_CHANGED" = "true" ] && packages="$packages ./drivers/clickhouse"
+        [ "$COCKROACHDB_CHANGED" = "true" ] && packages="$packages ./drivers/cockroachdb"
+        [ "$MSSQL_CHANGED" = "true" ] && packages="$packages ./drivers/mssql"
+
+        if [ -z "$packages" ]; then
+          packages="./..."
+        fi
+
+        echo "packages=$packages" >> "$GITHUB_OUTPUT"
+
     - name: Run tests
-      run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+      run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ${{ steps.packages.outputs.packages }}
       env:
         DATABASE_URL: postgres://postgres:postgres@localhost:5432/queen_test?sslmode=disable
 
@@ -63,10 +142,10 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version: '1.25'
 
@@ -84,10 +163,10 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version: '1.25'
 
@@ -100,17 +179,17 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version: '1.25'
 
     - name: Install golangci-lint
       run: |
-        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin latest
-        golangci-lint --version
+        go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+        $(go env GOPATH)/bin/golangci-lint --version
 
     - name: Run golangci-lint
-      run: golangci-lint run --timeout=5m ./...
+      run: $(go env GOPATH)/bin/golangci-lint run --timeout=5m ./...

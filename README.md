@@ -150,6 +150,51 @@ for _, p := range plans {
 }
 ```
 
+## Migration Metadata
+
+For each applied migration record, Queen can persist execution metadata alongside version, name, checksum, and timestamp. The built-in drivers support these fields:
+
+- `applied_by` — current OS user when available
+- `duration_ms` — migration execution time in milliseconds
+- `hostname` — current machine hostname when available
+- `environment` — value of `QUEEN_ENV`
+- `action` — operation type such as `apply` or `mark-applied`
+- `status` — operation result such as `success`
+- `error_message` — optional error details when recorded by the driver flow
+
+This table represents the current applied state of migrations. It is not a full append-only audit log of every migration event.
+
+Use `Status()` when you need the current state in code, and `Driver().GetApplied()` when you want the persisted applied records including metadata.
+
+## Driver Interface
+
+Custom database drivers implement the `queen.Driver` interface:
+
+```go
+type Driver interface {
+    Init(ctx context.Context) error
+    GetApplied(ctx context.Context) ([]Applied, error)
+    Record(ctx context.Context, m *Migration, meta *MigrationMetadata) error
+    Remove(ctx context.Context, version string) error
+    Lock(ctx context.Context, timeout time.Duration) error
+    Unlock(ctx context.Context) error
+    Exec(ctx context.Context, isolationLevel sql.IsolationLevel, fn func(*sql.Tx) error) error
+    Close() error
+}
+```
+
+In practice:
+
+- `Init` prepares the migration tracking tables or any driver-specific state
+- `GetApplied` returns the persisted applied migration records
+- `Record` persists a successful applied migration together with optional metadata
+- `Remove` removes an applied migration record after rollback
+- `Lock` and `Unlock` provide distributed migration safety
+- `Exec` runs migration code inside a transaction with the requested isolation level
+- `Close` releases driver resources
+
+If you are implementing a custom driver, use the built-in drivers as the reference behavior for locking, metadata persistence, and transaction execution.
+
 ## Distributed Locking
 
 When multiple instances of your app or CI run migrations concurrently, Queen acquires a database-level lock so only one runs at a time:

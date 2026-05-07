@@ -59,7 +59,20 @@ func RunWithDB(register RegisterFunc, dbOpener DBOpener) {
 func (app *App) addGlobalFlags() {
 	flags := app.rootCmd.PersistentFlags()
 
-	flags.StringVar(&app.config.Driver, "driver", "", fmt.Sprintf("Database driver (%s, %s, %s, %s)", DriverPostgres, DriverMySQL, DriverSQLite, DriverClickHouse))
+	flags.StringVar(
+		&app.config.Driver,
+		"driver",
+		"",
+		fmt.Sprintf(
+			"Database driver (%s, %s, %s, %s, %s, %s)",
+			DriverPostgres,
+			DriverMySQL,
+			DriverSQLite,
+			DriverClickHouse,
+			DriverCockroach,
+			DriverMSSQL,
+		),
+	)
 	flags.StringVar(&app.config.DSN, "dsn", "", "Database connection string")
 	flags.StringVar(&app.config.Table, "table", "queen_migrations", "Migration table name")
 	flags.DurationVar(&app.config.LockTimeout, "timeout", 0, "Lock timeout (e.g. 30m, 1h)")
