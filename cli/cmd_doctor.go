@@ -25,6 +25,12 @@ type DoctorResult struct {
 	Severity string `json:"severity,omitempty"`
 }
 
+type doctorOptions struct {
+	deep bool
+	gaps bool
+	fix  bool
+}
+
 func (app *App) doctorCmd() *cobra.Command {
 	var (
 		deep bool
@@ -43,27 +49,11 @@ func (app *App) doctorCmd() *cobra.Command {
 			}
 			defer func() { _ = q.Close() }()
 
-			results := make([]DoctorResult, 0)
-
-			// Run health checks
-			results = append(results, checkDatabaseConnection(ctx, q))
-			results = append(results, checkMigrationTable(ctx, q))
-			results = append(results, checkChecksums(ctx, q))
-
-			if gaps || !deep {
-				results = append(results, checkGaps(ctx, q))
-			}
-
-			results = append(results, checkRegistrationSync(ctx, q))
-
-			if deep {
-				results = append(results, checkSchemaConsistency(ctx, q))
-			}
-
-			// Auto-fix if requested
-			if fix {
-				results = append(results, attemptAutoFix(ctx, q, results)...)
-			}
+			results := collectDoctorResults(ctx, q, doctorOptions{
+				deep: deep,
+				gaps: gaps,
+				fix:  fix,
+			})
 
 			// Output results
 			if app.config.JSON {
@@ -79,6 +69,39 @@ func (app *App) doctorCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&fix, "fix", false, "Attempt to auto-fix issues")
 
 	return cmd
+}
+
+func collectDoctorResults(ctx context.Context, q *queen.Queen, opts doctorOptions) []DoctorResult {
+	results := make([]DoctorResult, 0)
+
+	if opts.gaps {
+		results = append(results, checkGaps(ctx, q))
+		if opts.fix {
+			results = append(results, attemptAutoFix(ctx, q, results)...)
+		}
+		return results
+	}
+
+	// Run health checks
+	results = append(results, checkDatabaseConnection(ctx, q))
+	results = append(results, checkMigrationTable(ctx, q))
+	results = append(results, checkChecksums(ctx, q))
+
+	if !opts.deep {
+		results = append(results, checkGaps(ctx, q))
+	}
+
+	results = append(results, checkRegistrationSync(ctx, q))
+
+	if opts.deep {
+		results = append(results, checkSchemaConsistency(ctx, q))
+	}
+
+	if opts.fix {
+		results = append(results, attemptAutoFix(ctx, q, results)...)
+	}
+
+	return results
 }
 
 // checkDatabaseConnection verifies database connectivity.
