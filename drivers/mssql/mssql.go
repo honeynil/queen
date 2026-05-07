@@ -30,7 +30,7 @@ func NewWithTableName(db *sql.DB, tableName string) *Driver {
 			DB:        db,
 			TableName: tableName,
 			Config: base.Config{
-				Placeholder:     base.PlaceholderQuestion,
+				Placeholder:     base.PlaceholderAtSign,
 				QuoteIdentifier: base.QuoteBrackets,
 				ParseTime:       nil,
 			},
@@ -102,14 +102,17 @@ func (d *Driver) Lock(ctx context.Context, timeout time.Duration) error {
 	query := `
 		DECLARE @result INT;
 		EXEC @result = sp_getapplock
-			@Resource = ?,
+			@Resource = @p1,
 			@LockMode = 'Exclusive',
 			@LockOwner = 'Session',
-			@LockTimeout = ?;
+			@LockTimeout = @p2;
 		SELECT @result;
 	`
 
-	err = conn.QueryRowContext(ctx, query, d.lockName, int(timeout.Milliseconds())).Scan(&result)
+	err = conn.QueryRowContext(ctx, query,
+		sql.Named("p1", d.lockName),
+		sql.Named("p2", int(timeout.Milliseconds())),
+	).Scan(&result)
 	if err != nil {
 		_ = conn.Close()
 		return fmt.Errorf("failed to acquire lock: %w", err)
@@ -146,12 +149,12 @@ func (d *Driver) Unlock(ctx context.Context) error {
 	query := `
 		DECLARE @result INT;
 		EXEC @result = sp_releaseapplock
-			@Resource = ?,
+			@Resource = @p1,
 			@LockOwner = 'Session';
 		SELECT @result;
 	`
 
-	err := d.conn.QueryRowContext(ctx, query, d.lockName).Scan(&result)
+	err := d.conn.QueryRowContext(ctx, query, sql.Named("p1", d.lockName)).Scan(&result)
 	if err != nil {
 		return fmt.Errorf("failed to release lock '%s' for table '%s': %w",
 			d.lockName, d.TableName, err)

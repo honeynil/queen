@@ -7,15 +7,12 @@ especially since many employees of one corporation may be contributing.
 To see the full list of contributors, see the revision history in
 source control or https://github.com/honeynil/queen/graphs/contributors
 
-## Main Authors
+## Main Author
 
 - **[@honeynil](https://github.com/honeynil)** - Creator and primary maintainer
 
 ## Contributors
 
-### ClickHouse Driver
+### ClickHouse/CockroachD Driver
 
-- **[@Higurashi09473](https://github.com/Higurashi09473)** - Initial ClickHouse driver implementation
-
-### ClickHouse Driver
-- **[@Higurashi09473](https://github.com/Higurashi09473)** - Initial CockroachDB driver implementation
+- **[@Higurashi09473](https://github.com/Higurashi09473)** - Initial ClickHouse/CockroachD driver implementation

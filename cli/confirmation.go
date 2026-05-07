@@ -39,7 +39,7 @@ func (app *App) checkConfirmation(operation string) error {
 	}
 
 	env := app.getEnvironmentName()
-	message := fmt.Sprintf("⚠️  WARNING: You are about to %s on %s environment\nDatabase: %s",
+	message := fmt.Sprintf("WARNING: WARNING: You are about to %s on %s environment\nDatabase: %s",
 		operation, strings.ToUpper(env), app.config.DSN)
 
 	if env == "production" {

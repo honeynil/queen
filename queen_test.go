@@ -37,7 +37,7 @@ func TestGetDriverName(t *testing.T) {
 func TestGetDriverNameNilDriver(t *testing.T) {
 	q := &Queen{driver: nil}
 	driverName := q.getDriverName()
-	if driverName != "unknown" {
-		t.Errorf("getDriverName() with nil driver = %q, want %q", driverName, "unknown")
+	if driverName != driverNameUnknown {
+		t.Errorf("getDriverName() with nil driver = %q, want %q", driverName, driverNameUnknown)
 	}
 }

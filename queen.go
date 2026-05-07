@@ -1,5 +1,4 @@
 // Package queen provides a lightweight database migration library for Go.
-// Migrations are defined as code, not files, providing type safety and better testing.
 package queen
 
 import (
@@ -16,12 +15,10 @@ import (
 )
 
 const (
-	// DirectionUp indicates migration application (pending -> applied).
-	DirectionUp = "up"
-	// DirectionDown indicates migration rollback (applied -> pending).
-	DirectionDown = "down"
-	// DriverUnknown represents an unknown or unsupported driver.
-	DriverUnknown = "unknown"
+	DirectionUp       = "up"
+	DirectionDown     = "down"
+	DriverUnknown     = "unknown"
+	driverNameUnknown = "DriverUnknown"
 )
 
 // Queen manages database migrations.
@@ -440,6 +437,16 @@ func (q *Queen) Driver() Driver {
 	return q.driver
 }
 
+// FindMigration returns a registered migration by version, or nil if not found.
+func (q *Queen) FindMigration(version string) *Migration {
+	for _, m := range q.migrations {
+		if m.Version == version {
+			return m
+		}
+	}
+	return nil
+}
+
 // lock acquires a migration lock and returns an unlock function.
 func (q *Queen) lock(ctx context.Context) (func(), error) {
 	if q.config.SkipLock {
@@ -461,7 +468,7 @@ func (q *Queen) lock(ctx context.Context) (func(), error) {
 // getDriverName returns the driver name for error context.
 func (q *Queen) getDriverName() string {
 	if q.driver == nil {
-		return "DriverUnknown"
+		return driverNameUnknown
 	}
 
 	driverType := fmt.Sprintf("%T", q.driver)
@@ -476,7 +483,7 @@ func (q *Queen) getDriverName() string {
 		return driverType
 	}
 
-	return "DriverUnknown"
+	return driverNameUnknown
 }
 
 func (q *Queen) loadApplied(ctx context.Context) error {

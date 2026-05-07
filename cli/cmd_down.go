@@ -50,7 +50,7 @@ func (app *App) downCmd() *cobra.Command {
 				return fmt.Errorf("failed to rollback migrations: %w", err)
 			}
 
-			fmt.Printf("✓ Rolled back %d migration(s)\n", steps)
+			fmt.Printf("Rolled back %d migration(s)\n", steps)
 			return nil
 		},
 	}
@@ -101,13 +101,13 @@ func migrateDownToVersion(ctx context.Context, q *queen.Queen, targetVersion str
 			if statuses[i].Status == queen.StatusApplied {
 				marker := "↓"
 				if statuses[i].Destructive {
-					marker = "⚠ ↓"
+					marker = "WARNING:"
 				}
 				fmt.Printf("  %s %s - %s\n", marker, statuses[i].Version, statuses[i].Name)
 			}
 		}
 		if hasDestructive {
-			fmt.Println("\n⚠  Warning: Some migrations contain destructive operations")
+			fmt.Println("\nWARNING: Some migrations contain destructive operations")
 		}
 		fmt.Println()
 
@@ -120,6 +120,6 @@ func migrateDownToVersion(ctx context.Context, q *queen.Queen, targetVersion str
 		return fmt.Errorf("failed to rollback migrations: %w", err)
 	}
 
-	fmt.Printf("✓ Successfully rolled back to version %s\n", targetVersion)
+	fmt.Printf("Successfully rolled back to version %s\n", targetVersion)
 	return nil
 }

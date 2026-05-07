@@ -14,7 +14,7 @@ import (
 func (app *App) statusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Show migration status",
+		Short: "Show status of all registered migrations",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 
@@ -90,7 +90,7 @@ func (app *App) outputStatusTable(statuses []queen.MigrationStatus) error {
 	applied, pending, modified := countStatuses(statuses)
 	fmt.Printf("\nSummary: %d total, %d applied, %d pending", len(statuses), applied, pending)
 	if modified > 0 {
-		fmt.Printf(", %d modified (⚠️  WARNING)", modified)
+		fmt.Printf(", %d modified (WARNING: WARNING)", modified)
 	}
 	fmt.Println()
 	return nil

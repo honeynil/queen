@@ -1,0 +1,88 @@
+version: 2
+
+run:
+  timeout: 5m
+  tests: true
+  modules-download-mode: readonly
+
+linters:
+  enable:
+    - copyloopvar
+    - goconst
+    - gocyclo
+    - misspell
+    - unconvert
+    - unparam
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - whitespace
+    - errorlint
+    - prealloc
+    - bodyclose
+    - sqlclosecheck
+
+linters-settings:
+  goconst:
+    min-len: 3
+    min-occurrences: 3
+
+  gocyclo:
+    min-complexity: 15
+
+  gocognit:
+    min-complexity: 60
+
+  misspell:
+    locale: US
+
+  gosec:
+    excludes:
+      - G201
+      - G301
+      - G304
+      - G306
+
+  staticcheck:
+    checks: ["all"]
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-dirs:
+    - third_party
+    - builtin
+    - examples
+  exclude:
+    - "G201: SQL string formatting"
+    - "G301: Expect directory permissions"
+    - "G304: Potential file inclusion"
+    - "G306: Expect WriteFile permissions"
+  exclude-rules:
+    - linters:
+        - errcheck
+        - goconst
+        - gocyclo
+        - gocognit
+        - gosec
+        - goerr113
+      path: _test\.go
+    - linters:
+        - gosec
+      text: "G201: SQL string formatting"
+    - linters:
+        - gosec
+      text: "G301: Expect directory permissions"
+    - linters:
+        - gosec
+      text: "G304: Potential file inclusion"
+    - linters:
+        - gosec
+      text: "G306: Expect WriteFile permissions"
+
+output:
+  format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true

@@ -16,6 +16,9 @@ func TestGetSQLDriverName(t *testing.T) {
 		{"sqlite", "sqlite3"},
 		{"sqlite3", "sqlite3"},
 		{"clickhouse", "clickhouse"},
+		{"cockroachdb", "pgx"},
+		{"mssql", "sqlserver"},
+		{"sqlserver", "sqlserver"},
 		{"unknown", "unknown"}, // passthrough for unknown drivers
 	}
 
@@ -42,6 +45,9 @@ func TestCreateDriver(t *testing.T) {
 		{"sqlite", false, ""},
 		{"sqlite3", false, ""},
 		{"clickhouse", false, ""},
+		{"cockroachdb", false, ""},
+		{"mssql", false, ""},
+		{"sqlserver", false, ""},
 		{"unknown", true, "unsupported driver"},
 		{"oracle", true, "unsupported driver"},
 	}

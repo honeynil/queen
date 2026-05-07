@@ -4,15 +4,19 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"regexp"
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/honeynil/queen"
 	"github.com/honeynil/queen/drivers/base"
 )
 
 // TestQuoteIdentifier tests the identifier quoting function.
 func TestQuoteIdentifier(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		input    string
@@ -57,7 +61,9 @@ func TestQuoteIdentifier(t *testing.T) {
 
 // TestDriverCreation tests driver creation functions.
 func TestDriverCreation(t *testing.T) {
-	db := &sql.DB{} // Mock DB for testing
+	t.Parallel()
+
+	db := &sql.DB{}
 
 	t.Run("New creates driver with default table name", func(t *testing.T) {
 		driver := New(db)
@@ -86,6 +92,281 @@ func TestDriverCreation(t *testing.T) {
 	})
 }
 
+func TestInit(t *testing.T) {
+	t.Parallel()
+
+	t.Run("creates migrations table successfully", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		mock.ExpectExec(regexp.QuoteMeta("CREATE TABLE IF NOT EXISTS `queen_migrations`")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		for i := 0; i < 7; i++ {
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS")).
+				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+			mock.ExpectExec(regexp.QuoteMeta("ALTER TABLE `queen_migrations` ADD COLUMN")).
+				WillReturnResult(sqlmock.NewResult(0, 0))
+		}
+
+		err = driver.Init(ctx)
+		if err != nil {
+			t.Errorf("Init() failed: %v", err)
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+
+	t.Run("handles CREATE TABLE error", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		createErr := errors.New("create table failed")
+		mock.ExpectExec(regexp.QuoteMeta("CREATE TABLE IF NOT EXISTS `queen_migrations`")).
+			WillReturnError(createErr)
+
+		err = driver.Init(ctx)
+		if !errors.Is(err, createErr) {
+			t.Errorf("Init() error = %v; want %v", err, createErr)
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+
+	t.Run("continues when columns already exist", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		mock.ExpectExec(regexp.QuoteMeta("CREATE TABLE IF NOT EXISTS `queen_migrations`")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		for i := 0; i < 7; i++ {
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS")).
+				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+		}
+
+		err = driver.Init(ctx)
+		if err != nil {
+			t.Errorf("Init() should not fail when columns exist: %v", err)
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+}
+
+func TestLock(t *testing.T) {
+	t.Parallel()
+
+	t.Run("acquires named lock successfully", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+			WithArgs("queen_lock_queen_migrations", sqlmock.AnyArg()).
+			WillReturnRows(sqlmock.NewRows([]string{"result"}).AddRow(1))
+
+		err = driver.Lock(ctx, 5*time.Second)
+		if err != nil {
+			t.Errorf("Lock() failed: %v", err)
+		}
+
+		if driver.conn == nil {
+			t.Error("conn should be set after successful lock")
+		}
+
+		// Cleanup
+		if driver.conn != nil {
+			_ = driver.conn.Close()
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+
+	t.Run("handles lock timeout", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+			WithArgs("queen_lock_queen_migrations", sqlmock.AnyArg()).
+			WillReturnRows(sqlmock.NewRows([]string{"result"}).AddRow(0))
+
+		err = driver.Lock(ctx, 100*time.Millisecond)
+		if !errors.Is(err, queen.ErrLockTimeout) {
+			t.Errorf("Lock() error = %v; want ErrLockTimeout", err)
+		}
+	})
+
+	t.Run("handles lock NULL result", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		var nullInt *int
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+			WithArgs("queen_lock_queen_migrations", sqlmock.AnyArg()).
+			WillReturnRows(sqlmock.NewRows([]string{"result"}).AddRow(nullInt))
+
+		err = driver.Lock(ctx, 5*time.Second)
+		if !errors.Is(err, queen.ErrLockTimeout) {
+			t.Errorf("Lock() error = %v; want ErrLockTimeout", err)
+		}
+	})
+
+	t.Run("handles GET_LOCK query error", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		lockErr := errors.New("get lock failed")
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+			WillReturnError(lockErr)
+
+		err = driver.Lock(ctx, 5*time.Second)
+		if err == nil {
+			t.Error("Lock() should return error when GET_LOCK fails")
+		}
+	})
+}
+
+func TestUnlock(t *testing.T) {
+	t.Parallel()
+
+	t.Run("unlocks successfully when locked", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+			WithArgs("queen_lock_queen_migrations", sqlmock.AnyArg()).
+			WillReturnRows(sqlmock.NewRows([]string{"result"}).AddRow(1))
+
+		err = driver.Lock(ctx, 5*time.Second)
+		if err != nil {
+			t.Fatalf("Lock() failed: %v", err)
+		}
+
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+			WithArgs("queen_lock_queen_migrations").
+			WillReturnRows(sqlmock.NewRows([]string{"result"}).AddRow(1))
+
+		err = driver.Unlock(ctx)
+		if err != nil {
+			t.Errorf("Unlock() failed: %v", err)
+		}
+
+		if driver.conn != nil {
+			t.Error("conn should be nil after unlock")
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+
+	t.Run("gracefully handles unlock when not locked", func(t *testing.T) {
+		db, _, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		err = driver.Unlock(ctx)
+		if err != nil {
+			t.Errorf("Unlock() when not locked should be graceful, got error: %v", err)
+		}
+	})
+
+	t.Run("handles unlock error", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+			WithArgs("queen_lock_queen_migrations", sqlmock.AnyArg()).
+			WillReturnRows(sqlmock.NewRows([]string{"result"}).AddRow(1))
+
+		err = driver.Lock(ctx, 5*time.Second)
+		if err != nil {
+			t.Fatalf("Lock() failed: %v", err)
+		}
+
+		unlockErr := errors.New("release lock failed")
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+			WithArgs("queen_lock_queen_migrations").
+			WillReturnError(unlockErr)
+
+		err = driver.Unlock(ctx)
+		if err == nil {
+			t.Error("Unlock() should return error when RELEASE_LOCK fails")
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+}
+
 // Note: Integration tests that require a real MySQL database are in mysql_integration_test.go
 // Run with: go test -tags=integration -v
 
@@ -94,13 +375,12 @@ func TestDriverCreation(t *testing.T) {
 func setupTestDB(t *testing.T) (*sql.DB, func()) {
 	t.Helper()
 
-	// Connect to MySQL (using port 3307 to avoid conflicts)
+	//  3307 to avoid conflicts
 	db, err := sql.Open("mysql", "root:test@tcp(localhost:3307)/testdb?parseTime=true&multiStatements=true")
 	if err != nil {
 		t.Skip("MySQL not available:", err)
 	}
 
-	// Verify connection
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -109,9 +389,7 @@ func setupTestDB(t *testing.T) (*sql.DB, func()) {
 		t.Skip("MySQL not available:", err)
 	}
 
-	// Cleanup function
 	cleanup := func() {
-		// Drop all test tables
 		_, _ = db.Exec("DROP TABLE IF EXISTS queen_migrations")
 		_, _ = db.Exec("DROP TABLE IF EXISTS test_users")
 		_, _ = db.Exec("DROP TABLE IF EXISTS test_posts")
@@ -128,13 +406,11 @@ func TestIntegrationInit(t *testing.T) {
 	driver := New(db)
 	ctx := context.Background()
 
-	// Init should create the table
 	err := driver.Init(ctx)
 	if err != nil {
 		t.Fatalf("Init() failed: %v", err)
 	}
 
-	// Verify table exists
 	var tableName string
 	err = db.QueryRowContext(ctx, "SHOW TABLES LIKE 'queen_migrations'").Scan(&tableName)
 	if err != nil {
@@ -144,7 +420,6 @@ func TestIntegrationInit(t *testing.T) {
 		t.Errorf("table name = %q; want %q", tableName, "queen_migrations")
 	}
 
-	// Init should be idempotent
 	err = driver.Init(ctx)
 	if err != nil {
 		t.Fatalf("second Init() failed: %v", err)
@@ -158,12 +433,10 @@ func TestIntegrationRecordAndGetApplied(t *testing.T) {
 	driver := New(db)
 	ctx := context.Background()
 
-	// Init
 	if err := driver.Init(ctx); err != nil {
 		t.Fatalf("Init() failed: %v", err)
 	}
 
-	// Initially should have no migrations
 	applied, err := driver.GetApplied(ctx)
 	if err != nil {
 		t.Fatalf("GetApplied() failed: %v", err)
@@ -172,7 +445,6 @@ func TestIntegrationRecordAndGetApplied(t *testing.T) {
 		t.Errorf("expected 0 migrations, got %d", len(applied))
 	}
 
-	// Record a migration
 	m1 := &queen.Migration{
 		Version: "001",
 		Name:    "create_users",
@@ -182,7 +454,6 @@ func TestIntegrationRecordAndGetApplied(t *testing.T) {
 		t.Fatalf("Record() failed: %v", err)
 	}
 
-	// Should now have 1 migration
 	applied, err = driver.GetApplied(ctx)
 	if err != nil {
 		t.Fatalf("GetApplied() failed: %v", err)
@@ -197,7 +468,6 @@ func TestIntegrationRecordAndGetApplied(t *testing.T) {
 		t.Errorf("name = %q; want %q", applied[0].Name, "create_users")
 	}
 
-	// Record another migration
 	m2 := &queen.Migration{
 		Version: "002",
 		Name:    "create_posts",
@@ -207,7 +477,6 @@ func TestIntegrationRecordAndGetApplied(t *testing.T) {
 		t.Fatalf("Record() failed: %v", err)
 	}
 
-	// Should now have 2 migrations in order
 	applied, err = driver.GetApplied(ctx)
 	if err != nil {
 		t.Fatalf("GetApplied() failed: %v", err)
@@ -215,7 +484,6 @@ func TestIntegrationRecordAndGetApplied(t *testing.T) {
 	if len(applied) != 2 {
 		t.Fatalf("expected 2 migrations, got %d", len(applied))
 	}
-	// Should be sorted by applied_at
 	if applied[0].Version != "001" {
 		t.Errorf("first version = %q; want %q", applied[0].Version, "001")
 	}
@@ -231,7 +499,6 @@ func TestIntegrationRemove(t *testing.T) {
 	driver := New(db)
 	ctx := context.Background()
 
-	// Init and record a migration
 	if err := driver.Init(ctx); err != nil {
 		t.Fatalf("Init() failed: %v", err)
 	}
@@ -245,18 +512,15 @@ func TestIntegrationRemove(t *testing.T) {
 		t.Fatalf("Record() failed: %v", err)
 	}
 
-	// Verify it was recorded
 	applied, _ := driver.GetApplied(ctx)
 	if len(applied) != 1 {
 		t.Fatalf("expected 1 migration, got %d", len(applied))
 	}
 
-	// Remove the migration
 	if err := driver.Remove(ctx, "001"); err != nil {
 		t.Fatalf("Remove() failed: %v", err)
 	}
 
-	// Should now be empty
 	applied, err := driver.GetApplied(ctx)
 	if err != nil {
 		t.Fatalf("GetApplied() failed: %v", err)
@@ -277,13 +541,11 @@ func TestIntegrationLocking(t *testing.T) {
 		t.Fatalf("Init() failed: %v", err)
 	}
 
-	// Acquire lock
 	err := driver.Lock(ctx, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Lock() failed: %v", err)
 	}
 
-	// Try to acquire the same lock from another driver instance (should fail)
 	db2, err := sql.Open("mysql", "root:test@tcp(localhost:3307)/testdb?parseTime=true")
 	if err != nil {
 		t.Fatalf("failed to open second connection: %v", err)
@@ -296,18 +558,15 @@ func TestIntegrationLocking(t *testing.T) {
 		t.Errorf("expected ErrLockTimeout, got %v", err)
 	}
 
-	// Release lock
 	if err := driver.Unlock(ctx); err != nil {
 		t.Fatalf("Unlock() failed: %v", err)
 	}
 
-	// Now the second driver should be able to acquire the lock
 	err = driver2.Lock(ctx, 5*time.Second)
 	if err != nil {
 		t.Fatalf("second Lock() failed after unlock: %v", err)
 	}
 
-	// Clean up
 	_ = driver2.Unlock(ctx)
 }
 
@@ -322,7 +581,6 @@ func TestIntegrationExec(t *testing.T) {
 		t.Fatalf("Init() failed: %v", err)
 	}
 
-	// Test successful transaction
 	err := driver.Exec(ctx, sql.LevelDefault, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 			CREATE TABLE test_users (
@@ -336,27 +594,23 @@ func TestIntegrationExec(t *testing.T) {
 		t.Fatalf("Exec() failed: %v", err)
 	}
 
-	// Verify table was created
 	var tableName string
 	err = db.QueryRowContext(ctx, "SHOW TABLES LIKE 'test_users'").Scan(&tableName)
 	if err != nil {
 		t.Fatalf("table was not created: %v", err)
 	}
 
-	// Test failed transaction (should rollback)
 	err = driver.Exec(ctx, sql.LevelDefault, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, "INSERT INTO test_users (name) VALUES ('Alice')")
 		if err != nil {
 			return err
 		}
-		// Return error to trigger rollback
 		return sql.ErrTxDone
 	})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
 
-	// Verify rollback (table should be empty)
 	var count int
 	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM test_users").Scan(&count)
 	if err != nil {
@@ -377,7 +631,6 @@ func TestIntegrationFullMigrationCycle(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Add migrations
 	q.MustAdd(queen.M{
 		Version: "001",
 		Name:    "create_users",
@@ -404,12 +657,10 @@ func TestIntegrationFullMigrationCycle(t *testing.T) {
 		DownSQL: `DROP TABLE test_posts`,
 	})
 
-	// Apply all migrations
 	if err := q.Up(ctx); err != nil {
 		t.Fatalf("Up() failed: %v", err)
 	}
 
-	// Verify tables exist
 	var tableCount int
 	err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'testdb' AND table_name IN ('test_users', 'test_posts')").Scan(&tableCount)
 	if err != nil {
@@ -419,7 +670,6 @@ func TestIntegrationFullMigrationCycle(t *testing.T) {
 		t.Errorf("expected 2 tables, got %d", tableCount)
 	}
 
-	// Check status
 	statuses, err := q.Status(ctx)
 	if err != nil {
 		t.Fatalf("Status() failed: %v", err)
@@ -433,12 +683,10 @@ func TestIntegrationFullMigrationCycle(t *testing.T) {
 		}
 	}
 
-	// Rollback all migrations
 	if err := q.Reset(ctx); err != nil {
 		t.Fatalf("Reset() failed: %v", err)
 	}
 
-	// Verify tables are gone
 	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'testdb' AND table_name IN ('test_users', 'test_posts')").Scan(&tableCount)
 	if err != nil {
 		t.Fatalf("failed to check tables: %v", err)

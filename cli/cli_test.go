@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"strings"
 	"testing"
@@ -11,17 +12,14 @@ import (
 )
 
 func TestAppGlobalFlags(t *testing.T) {
-	// Create app instance
 	app := &App{
 		registerFunc: func(q *queen.Queen) {},
 		config:       &Config{},
 	}
 
-	// Create root command with flags
 	app.rootCmd = createTestRootCmd(app)
 	app.addGlobalFlags()
 
-	// Parse flags
 	args := []string{
 		"--driver", "postgres",
 		"--dsn", "postgres://localhost/test",
@@ -39,7 +37,6 @@ func TestAppGlobalFlags(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Verify flags were parsed
 	if app.config.Driver != DriverPostgres {
 		t.Errorf("driver = %q, want %q", app.config.Driver, DriverPostgres)
 	}
@@ -78,13 +75,11 @@ func TestAppDefaultFlags(t *testing.T) {
 	app.rootCmd = createTestRootCmd(app)
 	app.addGlobalFlags()
 
-	// Execute without any flags
 	app.rootCmd.SetArgs([]string{})
 	if err := app.rootCmd.Execute(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Check defaults
 	if app.config.Table != "queen_migrations" {
 		t.Errorf("default table = %q, want %q", app.config.Table, "queen_migrations")
 	}
@@ -109,7 +104,6 @@ func TestRootCommandHelp(t *testing.T) {
 	app.addGlobalFlags()
 	app.addCommands()
 
-	// Capture output
 	var out bytes.Buffer
 	app.rootCmd.SetOut(&out)
 	app.rootCmd.SetErr(&out)
@@ -120,8 +114,6 @@ func TestRootCommandHelp(t *testing.T) {
 	}
 
 	output := out.String()
-
-	// Check help contains expected sections
 	checks := []string{
 		"Queen migration CLI",
 		"--driver",
@@ -172,7 +164,6 @@ func TestSubcommandHelp(t *testing.T) {
 
 	for _, sc := range subcommands {
 		t.Run(sc.name, func(t *testing.T) {
-			// Create fresh app for each test to avoid cobra caching issues
 			app := &App{
 				registerFunc: func(q *queen.Queen) {},
 				config:       &Config{},
@@ -203,14 +194,12 @@ func TestSubcommandHelp(t *testing.T) {
 func TestLoadConfigPriority(t *testing.T) {
 	tempDir := t.TempDir()
 
-	// Save original working directory
 	oldWd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = os.Chdir(oldWd) }()
 
-	// Save and restore environment
 	oldDriver := os.Getenv("QUEEN_DRIVER")
 	oldDSN := os.Getenv("QUEEN_DSN")
 	defer func() {
@@ -222,7 +211,6 @@ func TestLoadConfigPriority(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create config file
 	configYAML := `config_locked: false
 development:
   driver: sqlite
@@ -232,15 +220,14 @@ development:
 		t.Fatal(err)
 	}
 
-	// Set environment variables
 	_ = os.Setenv("QUEEN_DRIVER", "mysql")
 	_ = os.Setenv("QUEEN_DSN", "mysql://env/db")
 
 	t.Run("flags win over env and config", func(t *testing.T) {
 		app := &App{
 			config: &Config{
-				Driver:    "postgres",           // set by flag
-				DSN:       "postgres://flag/db", // set by flag
+				Driver:    "postgres",
+				DSN:       "postgres://flag/db",
 				Table:     "queen_migrations",
 				UseConfig: true,
 				Env:       "development",
@@ -251,7 +238,6 @@ development:
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		// Flags should win
 		if app.config.Driver != DriverPostgres {
 			t.Errorf("driver = %q, want %q (flag should win)", app.config.Driver, DriverPostgres)
 		}
@@ -263,7 +249,6 @@ development:
 	t.Run("env wins over config", func(t *testing.T) {
 		app := &App{
 			config: &Config{
-				// No flags set
 				Table:     "queen_migrations",
 				UseConfig: true,
 				Env:       "development",
@@ -274,16 +259,12 @@ development:
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		// Config loads first, then env overwrites
-		// But our implementation loads config first, then checks env for empty values
-		// Since config sets driver/dsn, env should NOT overwrite
 		if app.config.Driver != "sqlite" {
 			t.Errorf("driver = %q, want %q (config loaded first)", app.config.Driver, "sqlite")
 		}
 	})
 }
 
-// createTestRootCmd creates a minimal root command for testing
 func createTestRootCmd(_ *App) *cobra.Command {
 	return &cobra.Command{
 		Use:           "queen",
@@ -293,7 +274,6 @@ func createTestRootCmd(_ *App) *cobra.Command {
 	}
 }
 
-// createFullRootCmd creates a root command with full help text
 func createFullRootCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "queen",
@@ -306,5 +286,79 @@ Configuration priority:
   3. Config file .queen.yaml (lowest, requires --use-config)`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+	}
+}
+
+func TestSetupQueen(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns error when driver is missing", func(t *testing.T) {
+		t.Parallel()
+
+		app := &App{
+			config:       &Config{DSN: "test"},
+			registerFunc: func(q *queen.Queen) {},
+		}
+
+		ctx := context.Background()
+		_, err := app.setupQueen(ctx)
+
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !strings.Contains(err.Error(), "driver is required") {
+			t.Errorf("error = %q, want 'driver is required'", err.Error())
+		}
+	})
+
+	t.Run("returns error when dsn is missing", func(t *testing.T) {
+		t.Parallel()
+
+		app := &App{
+			config:       &Config{Driver: "postgres"},
+			registerFunc: func(q *queen.Queen) {},
+		}
+
+		ctx := context.Background()
+		_, err := app.setupQueen(ctx)
+
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !strings.Contains(err.Error(), "dsn is required") {
+			t.Errorf("error = %q, want 'dsn is required'", err.Error())
+		}
+	})
+}
+
+func TestAddCommands(t *testing.T) {
+	t.Parallel()
+
+	app := &App{
+		registerFunc: func(q *queen.Queen) {},
+		config:       &Config{},
+	}
+
+	app.rootCmd = createTestRootCmd(app)
+	app.addCommands()
+
+	expectedCommands := []string{
+		"create", "up", "down", "reset", "status", "validate",
+		"version", "plan", "explain", "log", "goto", "gap",
+		"diff", "doctor", "check", "init", "squash", "baseline",
+		"import", "tui",
+	}
+
+	for _, cmdName := range expectedCommands {
+		found := false
+		for _, cmd := range app.rootCmd.Commands() {
+			if cmd.Name() == cmdName {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("command %q not added", cmdName)
+		}
 	}
 }

@@ -1,0 +1,223 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+
+jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      shared: ${{ steps.filter.outputs.shared }}
+      postgres: ${{ steps.filter.outputs.postgres }}
+      mysql: ${{ steps.filter.outputs.mysql }}
+      sqlite: ${{ steps.filter.outputs.sqlite }}
+      clickhouse: ${{ steps.filter.outputs.clickhouse }}
+      cockroachdb: ${{ steps.filter.outputs.cockroachdb }}
+      mssql: ${{ steps.filter.outputs.mssql }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Detect changed paths
+      id: filter
+      uses: dorny/paths-filter@v3
+      with:
+        filters: |
+          shared:
+            - 'go.mod'
+            - 'go.sum'
+            - 'Makefile'
+            - '.github/workflows/**'
+            - '*.go'
+            - 'cli/**'
+            - 'internal/**'
+            - 'tests/integration/**'
+            - 'drivers/base/**'
+            - 'drivers/mock/**'
+          postgres:
+            - 'drivers/postgres/**'
+          mysql:
+            - 'drivers/mysql/**'
+          sqlite:
+            - 'drivers/sqlite/**'
+          clickhouse:
+            - 'drivers/clickhouse/**'
+          cockroachdb:
+            - 'drivers/cockroachdb/**'
+          mssql:
+            - 'drivers/mssql/**'
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.shared == 'true' || needs.changes.outputs.postgres == 'true' || needs.changes.outputs.mysql == 'true' || needs.changes.outputs.sqlite == 'true' || needs.changes.outputs.clickhouse == 'true' || needs.changes.outputs.cockroachdb == 'true' || needs.changes.outputs.mssql == 'true'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25'
+        cache: true
+
+    - name: Install dependencies
+      run: |
+        go mod download
+        go mod tidy
+
+    - name: Select test packages
+      id: packages
+      env:
+        SHARED_CHANGED: ${{ needs.changes.outputs.shared }}
+        POSTGRES_CHANGED: ${{ needs.changes.outputs.postgres }}
+        MYSQL_CHANGED: ${{ needs.changes.outputs.mysql }}
+        SQLITE_CHANGED: ${{ needs.changes.outputs.sqlite }}
+        CLICKHOUSE_CHANGED: ${{ needs.changes.outputs.clickhouse }}
+        COCKROACHDB_CHANGED: ${{ needs.changes.outputs.cockroachdb }}
+        MSSQL_CHANGED: ${{ needs.changes.outputs.mssql }}
+      run: |
+        if [ "$SHARED_CHANGED" = "true" ]; then
+          echo "packages=./..." >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        packages=""
+        [ "$POSTGRES_CHANGED" = "true" ] && packages="$packages ./drivers/postgres"
+        [ "$MYSQL_CHANGED" = "true" ] && packages="$packages ./drivers/mysql"
+        [ "$SQLITE_CHANGED" = "true" ] && packages="$packages ./drivers/sqlite"
+        [ "$CLICKHOUSE_CHANGED" = "true" ] && packages="$packages ./drivers/clickhouse"
+        [ "$COCKROACHDB_CHANGED" = "true" ] && packages="$packages ./drivers/cockroachdb"
+        [ "$MSSQL_CHANGED" = "true" ] && packages="$packages ./drivers/mssql"
+
+        if [ -z "$packages" ]; then
+          packages="./..."
+        fi
+
+        echo "packages=$packages" >> "$GITHUB_OUTPUT"
+
+    - name: Run unit tests
+      run: go test -v -race ${{ steps.packages.outputs.packages }}
+
+  integration-tests-postgres:
+    name: Postgres Integration
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.shared == 'true' || needs.changes.outputs.postgres == 'true'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25'
+
+    - name: Run Postgres integration tests
+      run: make test-postgres
+      timeout-minutes: 10
+
+  integration-tests-mysql:
+    name: MySQL Integration
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.shared == 'true' || needs.changes.outputs.mysql == 'true'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25'
+
+    - name: Run MySQL integration tests
+      run: make test-mysql
+      timeout-minutes: 10
+
+  integration-tests-sqlite:
+    name: SQLite Integration
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.shared == 'true' || needs.changes.outputs.sqlite == 'true'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25'
+
+    - name: Run SQLite integration tests
+      run: make test-sqlite
+      timeout-minutes: 5
+
+  integration-tests-cockroachdb:
+    name: CockroachDB Integration
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.shared == 'true' || needs.changes.outputs.cockroachdb == 'true'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25'
+
+    - name: Run CockroachDB integration tests
+      run: make test-cockroachdb
+      timeout-minutes: 10
+
+  integration-tests-clickhouse:
+    name: ClickHouse Integration
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.shared == 'true' || needs.changes.outputs.clickhouse == 'true'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25'
+
+    - name: Run ClickHouse integration tests
+      run: make test-clickhouse
+      timeout-minutes: 10
+
+  integration-tests-mssql:
+    name: MSSQL Integration
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.shared == 'true' || needs.changes.outputs.mssql == 'true'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25'
+
+    - name: Run MSSQL integration tests
+      run: make test-mssql
+      timeout-minutes: 10

@@ -75,7 +75,7 @@ func (app *App) outputPlanTable(plans []queen.MigrationPlan, direction string) e
 		if len(plan.Warnings) > 0 {
 			withWarnings++
 			// Show warning icon
-			warnings = "⚠️  " + strings.Join(plan.Warnings, "; ")
+			warnings = "WARNING: " + strings.Join(plan.Warnings, "; ")
 		}
 
 		if plan.HasRollback {
@@ -107,11 +107,11 @@ func (app *App) outputPlanTable(plans []queen.MigrationPlan, direction string) e
 	}
 
 	if withRollback < len(plans) && direction == "up" {
-		fmt.Printf("⚠️  %d migration(s) without rollback\n", len(plans)-withRollback)
+		fmt.Printf("WARNING: %d migration(s) without rollback\n", len(plans)-withRollback)
 	}
 
 	if withWarnings > 0 {
-		fmt.Printf("⚠️  %d migration(s) with warnings\n", withWarnings)
+		fmt.Printf("WARNING: %d migration(s) with warnings\n", withWarnings)
 	}
 
 	return nil

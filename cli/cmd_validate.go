@@ -24,7 +24,7 @@ func (app *App) validateCmd() *cobra.Command {
 				return fmt.Errorf("validation failed: %w", err)
 			}
 
-			fmt.Println("✓ All migrations are valid")
+			fmt.Println("All migrations are valid")
 			return nil
 		},
 	}

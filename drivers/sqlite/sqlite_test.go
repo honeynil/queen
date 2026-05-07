@@ -6,10 +6,12 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	_ "github.com/mattn/go-sqlite3"
 
 	"github.com/honeynil/queen"
@@ -62,7 +64,7 @@ func TestQuoteIdentifier(t *testing.T) {
 
 // TestDriverCreation tests driver creation functions.
 func TestDriverCreation(t *testing.T) {
-	db := &sql.DB{} // Mock DB for testing
+	db := &sql.DB{}
 
 	t.Run("New creates driver with default table name", func(t *testing.T) {
 		driver := New(db)
@@ -89,13 +91,11 @@ func TestDriverCreation(t *testing.T) {
 func setupTestDB(t *testing.T) (*sql.DB, func()) {
 	t.Helper()
 
-	// Use in-memory database for fast tests
 	db, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
 		t.Fatalf("failed to open SQLite: %v", err)
 	}
 
-	// Verify connection
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -104,14 +104,12 @@ func setupTestDB(t *testing.T) (*sql.DB, func()) {
 		t.Fatalf("failed to ping SQLite: %v", err)
 	}
 
-	// Enable foreign keys for tests
 	_, err = db.Exec("PRAGMA foreign_keys = ON")
 	if err != nil {
 		_ = db.Close()
 		t.Fatalf("failed to enable foreign keys: %v", err)
 	}
 
-	// Cleanup function
 	cleanup := func() {
 		_ = db.Close()
 	}
@@ -123,32 +121,27 @@ func setupTestDB(t *testing.T) (*sql.DB, func()) {
 func setupTestDBFile(t *testing.T) (*sql.DB, func()) {
 	t.Helper()
 
-	// Create temporary file
 	tmpfile, err := os.CreateTemp("", "queen-test-*.db")
 	if err != nil {
 		t.Fatalf("failed to create temp file: %v", err)
 	}
 	_ = tmpfile.Close()
 
-	// Open database with WAL mode for better concurrency testing
 	db, err := sql.Open("sqlite3", tmpfile.Name()+"?_journal_mode=WAL&_foreign_keys=on")
 	if err != nil {
 		_ = os.Remove(tmpfile.Name())
 		t.Fatalf("failed to open SQLite: %v", err)
 	}
 
-	// Verify connection
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		_ = os.Remove(tmpfile.Name())
 		t.Fatalf("failed to ping SQLite: %v", err)
 	}
 
-	// Cleanup function
 	cleanup := func() {
 		_ = db.Close()
 		_ = os.Remove(tmpfile.Name())
-		// Also remove WAL and SHM files if they exist
 		_ = os.Remove(tmpfile.Name() + "-wal")
 		_ = os.Remove(tmpfile.Name() + "-shm")
 	}
@@ -163,13 +156,11 @@ func TestInit(t *testing.T) {
 	driver := New(db)
 	ctx := context.Background()
 
-	// Init should create the table
 	err := driver.Init(ctx)
 	if err != nil {
 		t.Fatalf("Init() failed: %v", err)
 	}
 
-	// Verify table exists
 	var tableName string
 	err = db.QueryRowContext(ctx,
 		"SELECT name FROM sqlite_master WHERE type='table' AND name='queen_migrations'").Scan(&tableName)
@@ -180,7 +171,6 @@ func TestInit(t *testing.T) {
 		t.Errorf("table name = %q; want %q", tableName, "queen_migrations")
 	}
 
-	// Init should be idempotent
 	err = driver.Init(ctx)
 	if err != nil {
 		t.Fatalf("second Init() failed: %v", err)
@@ -194,12 +184,10 @@ func TestRecordAndGetApplied(t *testing.T) {
 	driver := New(db)
 	ctx := context.Background()
 
-	// Init
 	if err := driver.Init(ctx); err != nil {
 		t.Fatalf("Init() failed: %v", err)
 	}
 
-	// Initially should have no migrations
 	applied, err := driver.GetApplied(ctx)
 	if err != nil {
 		t.Fatalf("GetApplied() failed: %v", err)
@@ -208,7 +196,6 @@ func TestRecordAndGetApplied(t *testing.T) {
 		t.Errorf("expected 0 migrations, got %d", len(applied))
 	}
 
-	// Record a migration
 	m1 := &queen.Migration{
 		Version: "001",
 		Name:    "create_users",
@@ -218,7 +205,6 @@ func TestRecordAndGetApplied(t *testing.T) {
 		t.Fatalf("Record() failed: %v", err)
 	}
 
-	// Should now have 1 migration
 	applied, err = driver.GetApplied(ctx)
 	if err != nil {
 		t.Fatalf("GetApplied() failed: %v", err)
@@ -233,7 +219,6 @@ func TestRecordAndGetApplied(t *testing.T) {
 		t.Errorf("name = %q; want %q", applied[0].Name, "create_users")
 	}
 
-	// Record another migration
 	m2 := &queen.Migration{
 		Version: "002",
 		Name:    "create_posts",
@@ -243,7 +228,6 @@ func TestRecordAndGetApplied(t *testing.T) {
 		t.Fatalf("Record() failed: %v", err)
 	}
 
-	// Should now have 2 migrations in order
 	applied, err = driver.GetApplied(ctx)
 	if err != nil {
 		t.Fatalf("GetApplied() failed: %v", err)
@@ -251,7 +235,6 @@ func TestRecordAndGetApplied(t *testing.T) {
 	if len(applied) != 2 {
 		t.Fatalf("expected 2 migrations, got %d", len(applied))
 	}
-	// Should be sorted by applied_at
 	if applied[0].Version != "001" {
 		t.Errorf("first version = %q; want %q", applied[0].Version, "001")
 	}
@@ -267,7 +250,6 @@ func TestRemove(t *testing.T) {
 	driver := New(db)
 	ctx := context.Background()
 
-	// Init and record a migration
 	if err := driver.Init(ctx); err != nil {
 		t.Fatalf("Init() failed: %v", err)
 	}
@@ -281,18 +263,15 @@ func TestRemove(t *testing.T) {
 		t.Fatalf("Record() failed: %v", err)
 	}
 
-	// Verify it was recorded
 	applied, _ := driver.GetApplied(ctx)
 	if len(applied) != 1 {
 		t.Fatalf("expected 1 migration, got %d", len(applied))
 	}
 
-	// Remove the migration
 	if err := driver.Remove(ctx, "001"); err != nil {
 		t.Fatalf("Remove() failed: %v", err)
 	}
 
-	// Should now be empty
 	applied, err := driver.GetApplied(ctx)
 	if err != nil {
 		t.Fatalf("GetApplied() failed: %v", err)
@@ -303,7 +282,6 @@ func TestRemove(t *testing.T) {
 }
 
 func TestLocking(t *testing.T) {
-	// Use file-based database for proper lock testing
 	db, cleanup := setupTestDBFile(t)
 	defer cleanup()
 
@@ -314,13 +292,11 @@ func TestLocking(t *testing.T) {
 		t.Fatalf("Init() failed: %v", err)
 	}
 
-	// Acquire lock
 	err := driver.Lock(ctx, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Lock() failed: %v", err)
 	}
 
-	// Verify lock is working by checking locking mode
 	var lockingMode string
 	err = db.QueryRowContext(ctx, "PRAGMA locking_mode").Scan(&lockingMode)
 	if err != nil {
@@ -330,12 +306,10 @@ func TestLocking(t *testing.T) {
 		t.Errorf("locking_mode = %q; want %q", lockingMode, "exclusive")
 	}
 
-	// Release lock
 	if err := driver.Unlock(ctx); err != nil {
 		t.Fatalf("Unlock() failed: %v", err)
 	}
 
-	// Verify lock is released by checking locking mode is back to normal
 	err = db.QueryRowContext(ctx, "PRAGMA locking_mode").Scan(&lockingMode)
 	if err != nil {
 		t.Fatalf("failed to query locking mode: %v", err)
@@ -344,7 +318,6 @@ func TestLocking(t *testing.T) {
 		t.Errorf("locking_mode = %q; want %q after unlock", lockingMode, "normal")
 	}
 
-	// Test double unlock (should be safe)
 	if err := driver.Unlock(ctx); err != nil {
 		t.Errorf("double Unlock() should be safe, got error: %v", err)
 	}
@@ -361,7 +334,6 @@ func TestExec(t *testing.T) {
 		t.Fatalf("Init() failed: %v", err)
 	}
 
-	// Test successful transaction
 	err := driver.Exec(ctx, sql.LevelDefault, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 			CREATE TABLE test_users (
@@ -375,7 +347,6 @@ func TestExec(t *testing.T) {
 		t.Fatalf("Exec() failed: %v", err)
 	}
 
-	// Verify table was created
 	var tableName string
 	err = db.QueryRowContext(ctx,
 		"SELECT name FROM sqlite_master WHERE type='table' AND name='test_users'").Scan(&tableName)
@@ -383,20 +354,17 @@ func TestExec(t *testing.T) {
 		t.Fatalf("table was not created: %v", err)
 	}
 
-	// Test failed transaction (should rollback)
 	err = driver.Exec(ctx, sql.LevelDefault, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, "INSERT INTO test_users (name) VALUES ('Alice')")
 		if err != nil {
 			return err
 		}
-		// Return error to trigger rollback
 		return sql.ErrTxDone
 	})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
 
-	// Verify rollback (table should be empty)
 	var count int
 	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM test_users").Scan(&count)
 	if err != nil {
@@ -417,7 +385,6 @@ func TestFullMigrationCycle(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Add migrations
 	q.MustAdd(queen.M{
 		Version: "001",
 		Name:    "create_users",
@@ -444,12 +411,10 @@ func TestFullMigrationCycle(t *testing.T) {
 		DownSQL: `DROP TABLE test_posts`,
 	})
 
-	// Apply all migrations
 	if err := q.Up(ctx); err != nil {
 		t.Fatalf("Up() failed: %v", err)
 	}
 
-	// Verify tables exist
 	var tableCount int
 	err := db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('test_users', 'test_posts')").Scan(&tableCount)
@@ -460,7 +425,6 @@ func TestFullMigrationCycle(t *testing.T) {
 		t.Errorf("expected 2 tables, got %d", tableCount)
 	}
 
-	// Check status
 	statuses, err := q.Status(ctx)
 	if err != nil {
 		t.Fatalf("Status() failed: %v", err)
@@ -474,12 +438,10 @@ func TestFullMigrationCycle(t *testing.T) {
 		}
 	}
 
-	// Rollback all migrations
 	if err := q.Reset(ctx); err != nil {
 		t.Fatalf("Reset() failed: %v", err)
 	}
 
-	// Verify tables are gone
 	err = db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('test_users', 'test_posts')").Scan(&tableCount)
 	if err != nil {
@@ -491,7 +453,6 @@ func TestFullMigrationCycle(t *testing.T) {
 }
 
 func TestWALMode(t *testing.T) {
-	// Create temporary file
 	tmpfile, err := os.CreateTemp("", "queen-wal-test-*.db")
 	if err != nil {
 		t.Fatalf("failed to create temp file: %v", err)
@@ -501,14 +462,12 @@ func TestWALMode(t *testing.T) {
 	defer func() { _ = os.Remove(tmpfile.Name() + "-wal") }()
 	defer func() { _ = os.Remove(tmpfile.Name() + "-shm") }()
 
-	// Open with WAL mode
 	db, err := sql.Open("sqlite3", tmpfile.Name()+"?_journal_mode=WAL")
 	if err != nil {
 		t.Fatalf("failed to open SQLite: %v", err)
 	}
 	defer func() { _ = db.Close() }()
 
-	// Verify WAL mode is enabled
 	var journalMode string
 	err = db.QueryRow("PRAGMA journal_mode").Scan(&journalMode)
 	if err != nil {
@@ -518,7 +477,6 @@ func TestWALMode(t *testing.T) {
 		t.Errorf("journal_mode = %q; want 'wal'", journalMode)
 	}
 
-	// Test that migrations work in WAL mode
 	driver := New(db)
 	q := queen.New(driver)
 	defer func() { _ = q.Close() }()
@@ -536,7 +494,6 @@ func TestWALMode(t *testing.T) {
 		t.Fatalf("Up() failed in WAL mode: %v", err)
 	}
 
-	// Verify table exists
 	var tableName string
 	err = db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name='users'").Scan(&tableName)
 	if err != nil {
@@ -555,7 +512,6 @@ func TestTimestampParsing(t *testing.T) {
 		t.Fatalf("Init() failed: %v", err)
 	}
 
-	// Record a migration
 	m := &queen.Migration{
 		Version: "001",
 		Name:    "test_migration",
@@ -565,7 +521,6 @@ func TestTimestampParsing(t *testing.T) {
 		t.Fatalf("Record() failed: %v", err)
 	}
 
-	// Get applied migrations
 	applied, err := driver.GetApplied(ctx)
 	if err != nil {
 		t.Fatalf("GetApplied() failed: %v", err)
@@ -575,14 +530,117 @@ func TestTimestampParsing(t *testing.T) {
 		t.Fatalf("expected 1 migration, got %d", len(applied))
 	}
 
-	// Verify timestamp was parsed correctly
 	if applied[0].AppliedAt.IsZero() {
 		t.Error("AppliedAt should not be zero")
 	}
 
-	// Verify timestamp is recent (within last minute)
 	elapsed := time.Since(applied[0].AppliedAt)
 	if elapsed > time.Minute {
 		t.Errorf("AppliedAt timestamp seems incorrect: %v (elapsed: %v)", applied[0].AppliedAt, elapsed)
 	}
+}
+
+func TestLockUnit(t *testing.T) {
+	t.Parallel()
+
+	t.Run("handles busy_timeout error", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		timeoutErr := errors.New("pragma busy_timeout failed")
+		mock.ExpectExec("PRAGMA busy_timeout").WillReturnError(timeoutErr)
+
+		err = driver.Lock(ctx, 5*time.Second)
+		if err == nil {
+			t.Error("Lock() should return error when PRAGMA busy_timeout fails")
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+
+	t.Run("handles locking_mode error", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		mock.ExpectExec("PRAGMA busy_timeout").WillReturnResult(sqlmock.NewResult(0, 0))
+
+		lockErr := errors.New("pragma locking_mode failed")
+		mock.ExpectExec("PRAGMA locking_mode = EXCLUSIVE").WillReturnError(lockErr)
+
+		err = driver.Lock(ctx, 5*time.Second)
+		if err == nil {
+			t.Error("Lock() should return error when PRAGMA locking_mode fails")
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+}
+
+func TestUnlockUnit(t *testing.T) {
+	t.Parallel()
+
+	t.Run("handles unlock PRAGMA error", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		unlockErr := errors.New("pragma normal failed")
+		mock.ExpectExec("PRAGMA locking_mode = NORMAL").WillReturnError(unlockErr)
+
+		err = driver.Unlock(ctx)
+		if err == nil {
+			t.Error("Unlock() should return error when PRAGMA fails")
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+
+	t.Run("handles unlock transaction error", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		mock.ExpectExec("PRAGMA locking_mode = NORMAL").
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		txErr := errors.New("begin tx failed")
+		mock.ExpectBegin().WillReturnError(txErr)
+
+		err = driver.Unlock(ctx)
+		if err == nil {
+			t.Error("Unlock() should return error when BeginTx fails")
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
 }

@@ -208,10 +208,10 @@ func outputDiffTable(migrations []queen.MigrationStatus, v1, v2, direction strin
 	for _, m := range migrations {
 		status := m.Status.String()
 		if m.Status == queen.StatusModified {
-			status += " (⚠ modified)"
+			status += " (WARNING: modified)"
 		}
 		if m.Destructive {
-			status += " (⚠ destructive)"
+			status += " (WARNING: destructive)"
 		}
 
 		fmt.Printf("%-*s  %-*s  %s\n", maxVersion, m.Version, maxName, m.Name, status)
@@ -238,7 +238,7 @@ func outputDiffTable(migrations []queen.MigrationStatus, v1, v2, direction strin
 	fmt.Printf("Summary: %d applied, %d pending\n", applied, pending)
 
 	if direction == queen.DirectionDown && applied > 0 {
-		fmt.Println("\n⚠  Note: Going from current to target requires rollback")
+		fmt.Println("\nNOTE: Going from current to target requires rollback")
 	}
 }
 

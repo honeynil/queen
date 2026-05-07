@@ -48,12 +48,12 @@ func (app *App) upCmd() *cobra.Command {
 				if err := q.UpSteps(ctx, steps); err != nil {
 					return fmt.Errorf("failed to apply migrations: %w", err)
 				}
-				fmt.Printf("✓ Applied %d migration(s)\n", steps)
+				fmt.Printf("Applied %d migration(s)\n", steps)
 			} else {
 				if err := q.Up(ctx); err != nil {
 					return fmt.Errorf("failed to apply migrations: %w", err)
 				}
-				fmt.Println("✓ All migrations applied successfully")
+				fmt.Println("All migrations applied successfully")
 			}
 
 			return nil
@@ -114,6 +114,6 @@ func migrateUpToVersion(ctx context.Context, q *queen.Queen, targetVersion strin
 		return fmt.Errorf("failed to apply migrations: %w", err)
 	}
 
-	fmt.Printf("✓ Successfully migrated to version %s\n", targetVersion)
+	fmt.Printf("Successfully migrated to version %s\n", targetVersion)
 	return nil
 }

@@ -55,7 +55,7 @@ func (app *App) createCmd() *cobra.Command {
 				return fmt.Errorf("failed to create migration file: %w", err)
 			}
 
-			fmt.Printf("✓ Created migration file: %s\n\n", filename)
+			fmt.Printf("Created migration file: %s\n\n", filename)
 			fmt.Println("Next steps:")
 			fmt.Printf("1. Edit %s and add your migration logic\n", filename)
 			fmt.Println("2. Add this line to migrations/register.go:")

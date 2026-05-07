@@ -44,7 +44,6 @@ func (d *Driver) Exec(ctx context.Context, isolationLevel sql.IsolationLevel, fn
 	return tx.Commit()
 }
 
-// Close closes the database connection.
 func (d *Driver) Close() error {
 	return d.DB.Close()
 }
@@ -200,8 +199,14 @@ func PlaceholderQuestion(n int) string {
 	return "?"
 }
 
+// PlaceholderAtSign creates placeholders in the format @p1, @p2, @p3...
+// Used for MS SQL Server which requires named parameters.
+func PlaceholderAtSign(n int) string {
+	return fmt.Sprintf("@p%d", n)
+}
+
 // ParseTimeISO8601 parses time from ISO8601 string format.
-func ParseTimeISO8601(src interface{}) (time.Time, error) {
+func ParseTimeISO8601(src any) (time.Time, error) {
 	str, ok := src.(string)
 	if !ok {
 		return time.Time{}, fmt.Errorf("expected string, got %T", src)

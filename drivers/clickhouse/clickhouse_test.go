@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"regexp"
 	"testing"
 	"time"
 
 	_ "github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/honeynil/queen"
 	"github.com/honeynil/queen/drivers/base"
@@ -16,6 +18,8 @@ import (
 
 // TestQuoteIdentifier tests the identifier quoting function.
 func TestQuoteIdentifier(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		input    string
@@ -50,6 +54,7 @@ func TestQuoteIdentifier(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			result := base.QuoteDoubleQuotes(tt.input)
 			if result != tt.expected {
 				t.Errorf("base.QuoteDoubleQuotes(%q) = %q; want %q", tt.input, result, tt.expected)
@@ -60,9 +65,12 @@ func TestQuoteIdentifier(t *testing.T) {
 
 // TestDriverCreation tests driver creation functions.
 func TestDriverCreation(t *testing.T) {
+	t.Parallel()
+
 	db := &sql.DB{} // Mock DB for testing
 
 	t.Run("New creates driver with default table name", func(t *testing.T) {
+		t.Parallel()
 		driver, err := New(db)
 		if err != nil {
 			t.Fatalf("New() failed: %v", err)
@@ -79,6 +87,7 @@ func TestDriverCreation(t *testing.T) {
 	})
 
 	t.Run("NewWithTableName creates driver with custom table name", func(t *testing.T) {
+		t.Parallel()
 		driver, err := NewWithTableName(db, "custom_migrations")
 		if err != nil {
 			t.Fatalf("NewWithTableName() failed: %v", err)
@@ -92,9 +101,13 @@ func TestDriverCreation(t *testing.T) {
 		if driver.ownerID == "" {
 			t.Error("driver.ownerID should be set")
 		}
+		if driver.lockTableName != "custom_migrations_lock" {
+			t.Errorf("driver.lockTableName = %q; want %q", driver.lockTableName, "custom_migrations_lock")
+		}
 	})
 
 	t.Run("New generates unique owner IDs", func(t *testing.T) {
+		t.Parallel()
 		driver1, err := New(db)
 		if err != nil {
 			t.Fatalf("New() failed: %v", err)
@@ -109,15 +122,259 @@ func TestDriverCreation(t *testing.T) {
 	})
 }
 
+// TestInit_Unit tests Init with mocked database (unit test).
+func TestInit_Unit(t *testing.T) {
+	t.Parallel()
+
+	t.Run("creates migrations table and lock table successfully", func(t *testing.T) {
+		t.Parallel()
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver, err := New(db)
+		if err != nil {
+			t.Fatalf("New() failed: %v", err)
+		}
+		ctx := context.Background()
+
+		// Expect CREATE TABLE for migrations
+		mock.ExpectExec(regexp.QuoteMeta("CREATE TABLE IF NOT EXISTS")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		// Expect CREATE TABLE for lock table
+		mock.ExpectExec(regexp.QuoteMeta("CREATE TABLE IF NOT EXISTS")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		err = driver.Init(ctx)
+		if err != nil {
+			t.Errorf("Init() failed: %v", err)
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+
+	t.Run("handles CREATE TABLE error", func(t *testing.T) {
+		t.Parallel()
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver, err := New(db)
+		if err != nil {
+			t.Fatalf("New() failed: %v", err)
+		}
+		ctx := context.Background()
+
+		createErr := errors.New("create table failed")
+		mock.ExpectExec(regexp.QuoteMeta("CREATE TABLE IF NOT EXISTS")).
+			WillReturnError(createErr)
+
+		err = driver.Init(ctx)
+		if !errors.Is(err, createErr) {
+			t.Errorf("Init() error = %v; want %v", err, createErr)
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+}
+
+// TestLock_Unit tests Lock with mocked database
+func TestLock_Unit(t *testing.T) {
+	t.Parallel()
+
+	t.Run("acquires table lock successfully", func(t *testing.T) {
+		t.Parallel()
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver, err := New(db)
+		if err != nil {
+			t.Fatalf("New() failed: %v", err)
+		}
+		ctx := context.Background()
+
+		mock.ExpectExec(regexp.QuoteMeta("ALTER TABLE")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT count(*) FROM")).
+			WithArgs("migration_lock").
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(int64(0)))
+
+		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO")).
+			WithArgs("migration_lock", sqlmock.AnyArg(), driver.ownerID).
+			WillReturnResult(sqlmock.NewResult(1, 1))
+
+		err = driver.Lock(ctx, 5*time.Second)
+		if err != nil {
+			t.Errorf("Lock() failed: %v", err)
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+
+	t.Run("handles lock timeout when table has existing lock", func(t *testing.T) {
+		t.Parallel()
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver, err := New(db)
+		if err != nil {
+			t.Fatalf("New() failed: %v", err)
+		}
+		ctx := context.Background()
+
+		mock.ExpectExec(regexp.QuoteMeta("ALTER TABLE")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT count(*) FROM")).
+			WithArgs("migration_lock").
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(int64(1)))
+
+		err = driver.Lock(ctx, 100*time.Millisecond)
+		if !errors.Is(err, queen.ErrLockTimeout) {
+			t.Errorf("Lock() error = %v; want ErrLockTimeout", err)
+		}
+	})
+
+	t.Run("handles SELECT query error", func(t *testing.T) {
+		t.Parallel()
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver, err := New(db)
+		if err != nil {
+			t.Fatalf("New() failed: %v", err)
+		}
+		ctx := context.Background()
+
+		mock.ExpectExec(regexp.QuoteMeta("ALTER TABLE")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		checkErr := errors.New("select failed")
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT count(*) FROM")).
+			WithArgs("migration_lock").
+			WillReturnError(checkErr)
+
+		err = driver.Lock(ctx, 5*time.Second)
+		if err == nil {
+			t.Error("Lock() should return error when SELECT fails")
+		}
+	})
+}
+
+// TestUnlock_Unit tests Unlock with mocked database
+func TestUnlock_Unit(t *testing.T) {
+	t.Parallel()
+
+	t.Run("unlocks successfully", func(t *testing.T) {
+		t.Parallel()
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver, err := New(db)
+		if err != nil {
+			t.Fatalf("New() failed: %v", err)
+		}
+		ctx := context.Background()
+
+		mock.ExpectExec(regexp.QuoteMeta("ALTER TABLE")).
+			WithArgs("migration_lock", driver.ownerID).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		err = driver.Unlock(ctx)
+		if err != nil {
+			t.Errorf("Unlock() failed: %v", err)
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+
+	t.Run("handles unlock error", func(t *testing.T) {
+		t.Parallel()
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver, err := New(db)
+		if err != nil {
+			t.Fatalf("New() failed: %v", err)
+		}
+		ctx := context.Background()
+
+		unlockErr := errors.New("delete lock failed")
+		mock.ExpectExec(regexp.QuoteMeta("ALTER TABLE")).
+			WithArgs("migration_lock", driver.ownerID).
+			WillReturnError(unlockErr)
+
+		err = driver.Unlock(ctx)
+		if err == nil {
+			t.Error("Unlock() should return error when DELETE fails")
+		}
+	})
+
+	t.Run("gracefully handles unlock when not locked", func(t *testing.T) {
+		t.Parallel()
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver, err := New(db)
+		if err != nil {
+			t.Fatalf("New() failed: %v", err)
+		}
+		ctx := context.Background()
+
+		mock.ExpectExec(regexp.QuoteMeta("ALTER TABLE")).
+			WithArgs("migration_lock", driver.ownerID).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		err = driver.Unlock(ctx)
+		if err != nil {
+			t.Errorf("Unlock() should be graceful when no lock exists, got error: %v", err)
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+}
+
 // setupTestDB creates a test database connection.
 // This requires ClickHouse to be running. Tests will be skipped if ClickHouse is not available.
 func setupTestDB(t *testing.T) (*sql.DB, func()) {
 	t.Helper()
 
-	// Try to get DSN from environment variable first
 	dsn := os.Getenv("CLICKHOUSE_TEST_DSN")
 	if dsn == "" {
-		// Default DSN for local testing
 		dsn = "clickhouse://default@localhost:9000/default?dial_timeout=5s"
 	}
 
@@ -126,7 +383,6 @@ func setupTestDB(t *testing.T) (*sql.DB, func()) {
 		t.Skip("ClickHouse not available:", err)
 	}
 
-	// Verify connection
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -135,9 +391,7 @@ func setupTestDB(t *testing.T) (*sql.DB, func()) {
 		t.Skip("ClickHouse not available:", err)
 	}
 
-	// Cleanup function
 	cleanup := func() {
-		// Drop all test tables
 		_, _ = db.Exec("DROP TABLE IF EXISTS queen_migrations")
 		_, _ = db.Exec("DROP TABLE IF EXISTS queen_migrations_lock")
 		_, _ = db.Exec("DROP TABLE IF EXISTS test_users")
@@ -148,7 +402,7 @@ func setupTestDB(t *testing.T) (*sql.DB, func()) {
 	return db, cleanup
 }
 
-func TestInit(t *testing.T) {
+func TestInit_Integration(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
@@ -158,13 +412,11 @@ func TestInit(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	// Init should create the table
 	err = driver.Init(ctx)
 	if err != nil {
 		t.Fatalf("Init() failed: %v", err)
 	}
 
-	// Verify table exists
 	var tableName string
 	err = db.QueryRowContext(ctx,
 		"SELECT name FROM system.tables WHERE database = 'default' AND name = 'queen_migrations'").Scan(&tableName)
@@ -175,7 +427,6 @@ func TestInit(t *testing.T) {
 		t.Errorf("table name = %q; want %q", tableName, "queen_migrations")
 	}
 
-	// Init should be idempotent
 	err = driver.Init(ctx)
 	if err != nil {
 		t.Fatalf("second Init() failed: %v", err)
@@ -192,12 +443,10 @@ func TestRecordAndGetApplied(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	// Init
 	if err := driver.Init(ctx); err != nil {
 		t.Fatalf("Init() failed: %v", err)
 	}
 
-	// Initially should have no migrations
 	applied, err := driver.GetApplied(ctx)
 	if err != nil {
 		t.Fatalf("GetApplied() failed: %v", err)
@@ -206,7 +455,6 @@ func TestRecordAndGetApplied(t *testing.T) {
 		t.Errorf("expected 0 migrations, got %d", len(applied))
 	}
 
-	// Record a migration
 	m1 := &queen.Migration{
 		Version: "001",
 		Name:    "create_users",
@@ -218,7 +466,6 @@ func TestRecordAndGetApplied(t *testing.T) {
 		t.Fatalf("Record() failed: %v", err)
 	}
 
-	// Should now have 1 migration
 	applied, err = driver.GetApplied(ctx)
 	if err != nil {
 		t.Fatalf("GetApplied() failed: %v", err)
@@ -233,7 +480,6 @@ func TestRecordAndGetApplied(t *testing.T) {
 		t.Errorf("name = %q; want %q", applied[0].Name, "create_users")
 	}
 
-	// Record another migration
 	m2 := &queen.Migration{
 		Version: "002",
 		Name:    "create_posts",
@@ -245,7 +491,6 @@ func TestRecordAndGetApplied(t *testing.T) {
 		t.Fatalf("Record() failed: %v", err)
 	}
 
-	// Should now have 2 migrations in order
 	applied, err = driver.GetApplied(ctx)
 	if err != nil {
 		t.Fatalf("GetApplied() failed: %v", err)
@@ -253,7 +498,6 @@ func TestRecordAndGetApplied(t *testing.T) {
 	if len(applied) != 2 {
 		t.Fatalf("expected 2 migrations, got %d", len(applied))
 	}
-	// Should be sorted by applied_at
 	if applied[0].Version != "001" {
 		t.Errorf("first version = %q; want %q", applied[0].Version, "001")
 	}
@@ -272,7 +516,6 @@ func TestRemove(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	// Init and record a migration
 	if err := driver.Init(ctx); err != nil {
 		t.Fatalf("Init() failed: %v", err)
 	}
@@ -288,18 +531,15 @@ func TestRemove(t *testing.T) {
 		t.Fatalf("Record() failed: %v", err)
 	}
 
-	// Verify it was recorded
 	applied, _ := driver.GetApplied(ctx)
 	if len(applied) != 1 {
 		t.Fatalf("expected 1 migration, got %d", len(applied))
 	}
 
-	// Remove the migration
 	if err := driver.Remove(ctx, "001"); err != nil {
 		t.Fatalf("Remove() failed: %v", err)
 	}
 
-	// Should now be empty
 	applied, err = driver.GetApplied(ctx)
 	if err != nil {
 		t.Fatalf("GetApplied() failed: %v", err)
@@ -309,7 +549,7 @@ func TestRemove(t *testing.T) {
 	}
 }
 
-func TestLocking(t *testing.T) {
+func TestLocking_Integration(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
@@ -323,30 +563,26 @@ func TestLocking(t *testing.T) {
 		t.Fatalf("Init() failed: %v", err)
 	}
 
-	// Acquire lock
 	err = driver.Lock(ctx, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Lock() failed: %v", err)
 	}
 
-	// Try to acquire the same lock from the same driver instance (should fail)
+	// Try to acquire the same lock from the same driver instance
 	err = driver.Lock(ctx, 100*time.Millisecond)
 	if !errors.Is(err, queen.ErrLockTimeout) {
 		t.Errorf("expected ErrLockTimeout, got %v", err)
 	}
 
-	// Release lock
 	if err := driver.Unlock(ctx); err != nil {
 		t.Fatalf("Unlock() failed: %v", err)
 	}
 
-	// Now should be able to acquire the lock again
 	err = driver.Lock(ctx, 5*time.Second)
 	if err != nil {
 		t.Fatalf("second Lock() failed after unlock: %v", err)
 	}
 
-	// Clean up
 	_ = driver.Unlock(ctx)
 }
 
@@ -364,7 +600,6 @@ func TestExec(t *testing.T) {
 		t.Fatalf("Init() failed: %v", err)
 	}
 
-	// Test successful transaction
 	err = driver.Exec(ctx, sql.LevelDefault, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 			CREATE TABLE test_users (
@@ -378,7 +613,6 @@ func TestExec(t *testing.T) {
 		t.Fatalf("Exec() failed: %v", err)
 	}
 
-	// Verify table was created
 	var tableName string
 	err = db.QueryRowContext(ctx,
 		"SELECT name FROM system.tables WHERE database = 'default' AND name = 'test_users'").Scan(&tableName)
@@ -386,7 +620,7 @@ func TestExec(t *testing.T) {
 		t.Fatalf("table was not created: %v", err)
 	}
 
-	// Test failed transaction (should rollback)
+	// Test failed transaction
 	// Note: ClickHouse doesn't support full ACID transactions like PostgreSQL/MySQL,
 	// so rollback behavior may be limited. This test verifies the error handling.
 	err = driver.Exec(ctx, sql.LevelDefault, func(tx *sql.Tx) error {
@@ -394,7 +628,6 @@ func TestExec(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		// Return error to trigger rollback
 		return sql.ErrTxDone
 	})
 	if err == nil {
@@ -415,7 +648,6 @@ func TestFullMigrationCycle(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Add migrations
 	q.MustAdd(queen.M{
 		Version: "001",
 		Name:    "create_users",
@@ -441,12 +673,10 @@ func TestFullMigrationCycle(t *testing.T) {
 		DownSQL: `DROP TABLE test_posts`,
 	})
 
-	// Apply all migrations
 	if err := q.Up(ctx); err != nil {
 		t.Fatalf("Up() failed: %v", err)
 	}
 
-	// Verify tables exist
 	var tableCount uint64
 	err = db.QueryRowContext(ctx,
 		"SELECT count() FROM system.tables WHERE database = 'default' AND name IN ('test_users', 'test_posts')").Scan(&tableCount)
@@ -457,7 +687,6 @@ func TestFullMigrationCycle(t *testing.T) {
 		t.Errorf("expected 2 tables, got %d", tableCount)
 	}
 
-	// Check status
 	statuses, err := q.Status(ctx)
 	if err != nil {
 		t.Fatalf("Status() failed: %v", err)
@@ -471,12 +700,10 @@ func TestFullMigrationCycle(t *testing.T) {
 		}
 	}
 
-	// Rollback all migrations
 	if err := q.Reset(ctx); err != nil {
 		t.Fatalf("Reset() failed: %v", err)
 	}
 
-	// Verify tables are gone
 	err = db.QueryRowContext(ctx,
 		"SELECT count() FROM system.tables WHERE database = 'default' AND name IN ('test_users', 'test_posts')").Scan(&tableCount)
 	if err != nil {
@@ -501,7 +728,6 @@ func TestTimestampParsing(t *testing.T) {
 		t.Fatalf("Init() failed: %v", err)
 	}
 
-	// Record a migration
 	m := &queen.Migration{
 		Version: "001",
 		Name:    "test_migration",
@@ -513,7 +739,6 @@ func TestTimestampParsing(t *testing.T) {
 		t.Fatalf("Record() failed: %v", err)
 	}
 
-	// Get applied migrations
 	applied, err := driver.GetApplied(ctx)
 	if err != nil {
 		t.Fatalf("GetApplied() failed: %v", err)
@@ -523,12 +748,10 @@ func TestTimestampParsing(t *testing.T) {
 		t.Fatalf("expected 1 migration, got %d", len(applied))
 	}
 
-	// Verify timestamp was parsed correctly
 	if applied[0].AppliedAt.IsZero() {
 		t.Error("AppliedAt should not be zero")
 	}
 
-	// Verify timestamp is recent (within last minute)
 	elapsed := time.Since(applied[0].AppliedAt)
 	if elapsed > time.Minute {
 		t.Errorf("AppliedAt timestamp seems incorrect: %v (elapsed: %v)", applied[0].AppliedAt, elapsed)
@@ -588,10 +811,9 @@ func TestLockOwnership_PreventsCrossProcessUnlock(t *testing.T) {
 		t.Fatalf("failed to delete lock: %v", err)
 	}
 
-	// Wait for ClickHouse to process the deletion (async operation)
+	// Wait for ClickHouse to process the deletion
 	time.Sleep(2 * time.Second)
 
-	// Verify lock was deleted
 	var count int64
 	err = db.QueryRowContext(ctx,
 		"SELECT count(*) FROM queen_migrations_lock FINAL WHERE lock_key = 'migration_lock'").Scan(&count)
@@ -666,15 +888,13 @@ func TestLock_ContextCancellation(t *testing.T) {
 		t.Fatalf("Init() failed: %v", err)
 	}
 
-	// Acquire lock
 	if err := driver.Lock(context.Background(), 5*time.Second); err != nil {
 		t.Fatalf("Lock() failed: %v", err)
 	}
 	defer func() { _ = driver.Unlock(context.Background()) }()
 
-	// Try to acquire lock with canceled context
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately
+	cancel()
 
 	err = driver.Lock(ctx, 5*time.Second)
 	if err == nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/user"
+	"slices"
 	"strings"
 
 	"github.com/honeynil/queen"
@@ -48,7 +49,7 @@ func (app *App) gapDetectCmd() *cobra.Command {
 
 			if len(gaps) == 0 {
 				if !app.config.JSON {
-					fmt.Println("✓ No gaps detected")
+					fmt.Println("No gaps detected")
 				} else {
 					fmt.Println("[]")
 				}
@@ -86,7 +87,7 @@ func (app *App) gapAnalyzeCmd() *cobra.Command {
 			}
 
 			if len(gaps) == 0 {
-				fmt.Println("✓ No gaps detected")
+				fmt.Println("No gaps detected")
 				return nil
 			}
 
@@ -119,7 +120,7 @@ func (app *App) gapFillCmd() *cobra.Command {
 			}
 
 			if len(gaps) == 0 {
-				fmt.Println("✓ No gaps detected")
+				fmt.Println("No gaps detected")
 				return nil
 			}
 
@@ -127,15 +128,7 @@ func (app *App) gapFillCmd() *cobra.Command {
 			applicationGaps := make([]queen.Gap, 0)
 			for _, gap := range gaps {
 				if gap.Type == queen.GapTypeApplication {
-					// If specific versions provided, filter by them
-					if len(args) > 0 {
-						for _, version := range args {
-							if gap.Version == version {
-								applicationGaps = append(applicationGaps, gap)
-								break
-							}
-						}
-					} else {
+					if len(args) == 0 || slices.Contains(args, gap.Version) {
 						applicationGaps = append(applicationGaps, gap)
 					}
 				}
@@ -148,7 +141,7 @@ func (app *App) gapFillCmd() *cobra.Command {
 
 			// Show what will be done
 			if markApplied {
-				fmt.Println("⚠  Warning: Marking migrations as applied without executing them")
+				fmt.Println("WARNING: Marking migrations as applied without executing them")
 				fmt.Println("This should only be used if migrations were manually applied.")
 			}
 
@@ -202,7 +195,7 @@ func (app *App) gapIgnoreCmd() *cobra.Command {
 
 			// Check if already ignored
 			if qi.IsIgnored(version) {
-				fmt.Printf("⚠  Version %s is already ignored\n", version)
+				fmt.Printf("WARNING: Version %s is already ignored\n", version)
 				if existingReason := qi.GetReason(version); existingReason != "" {
 					fmt.Printf("   Existing reason: %s\n", existingReason)
 				}
@@ -220,7 +213,7 @@ func (app *App) gapIgnoreCmd() *cobra.Command {
 				return fmt.Errorf("failed to save .queenignore: %w", err)
 			}
 
-			fmt.Printf("✓ Added version %s to .queenignore\n", version)
+			fmt.Printf("Added version %s to .queenignore\n", version)
 			if reason != "" {
 				fmt.Printf("  Reason: %s\n", reason)
 			}
@@ -285,7 +278,7 @@ func (app *App) gapUnignoreCmd() *cobra.Command {
 
 			// Check if it's ignored
 			if !qi.IsIgnored(version) {
-				fmt.Printf("⚠  Version %s is not in .queenignore\n", version)
+				fmt.Printf("WARNING: Version %s is not in .queenignore\n", version)
 				return nil
 			}
 
@@ -294,7 +287,7 @@ func (app *App) gapUnignoreCmd() *cobra.Command {
 				return fmt.Errorf("failed to save .queenignore: %w", err)
 			}
 
-			fmt.Printf("✓ Removed version %s from .queenignore\n", version)
+			fmt.Printf("Removed version %s from .queenignore\n", version)
 			fmt.Println()
 			fmt.Println("This gap will now be detected by 'queen gap detect' and 'queen doctor'")
 
@@ -321,7 +314,7 @@ func outputGapsTable(gaps []queen.Gap) {
 
 	// Print errors first
 	if len(errors) > 0 {
-		fmt.Printf("⚠  Errors (%d):\n\n", len(errors))
+		fmt.Printf("WARNING: Errors (%d):\n\n", len(errors))
 		for _, gap := range errors {
 			fmt.Printf("  [%s] %s\n", gap.Type, gap.Version)
 			fmt.Printf("    %s\n", gap.Description)
@@ -334,7 +327,7 @@ func outputGapsTable(gaps []queen.Gap) {
 
 	// Print warnings
 	if len(warnings) > 0 {
-		fmt.Printf("⚠  Warnings (%d):\n\n", len(warnings))
+		fmt.Printf("WARNING: Warnings (%d):\n\n", len(warnings))
 		for _, gap := range warnings {
 			fmt.Printf("  [%s] %s", gap.Type, gap.Version)
 			if gap.Name != "" {
@@ -369,13 +362,11 @@ func analyzeGaps(gaps []queen.Gap) {
 	fmt.Println(strings.Repeat("=", 50))
 	fmt.Println()
 
-	// Group by type
 	byType := make(map[queen.GapType][]queen.Gap)
 	for _, gap := range gaps {
 		byType[gap.Type] = append(byType[gap.Type], gap)
 	}
 
-	// Analyze each type
 	if numGaps, ok := byType[queen.GapTypeNumbering]; ok && len(numGaps) > 0 {
 		fmt.Printf("Numbering Gaps (%d):\n", len(numGaps))
 		fmt.Println("These are missing version numbers in your sequence.")
@@ -475,30 +466,46 @@ func fillGapsByApplying(ctx context.Context, q *queen.Queen, gaps []queen.Gap) e
 	}
 
 	fmt.Println()
-	fmt.Printf("✓ Successfully filled %d gap(s)\n", successCount)
+	fmt.Printf("Successfully filled %d gap(s)\n", successCount)
 	return nil
 }
 
 // fillGapsByMarking marks migrations as applied without executing them.
-func fillGapsByMarking(_ context.Context, _ *queen.Queen, gaps []queen.Gap) error {
-	// This is dangerous and should only be used when migrations were manually applied
-	// For now, we'll implement basic logic
-
-	fmt.Println("⚠  Marking migrations as applied (dangerous operation)")
+func fillGapsByMarking(ctx context.Context, q *queen.Queen, gaps []queen.Gap) error {
+	fmt.Println("WARNING: Marking migrations as applied without executing SQL (dangerous operation)")
 	fmt.Println()
 
+	currentUser := "unknown"
+	if u, err := user.Current(); err == nil {
+		currentUser = u.Username
+	}
+
+	successCount := 0
 	for _, gap := range gaps {
 		fmt.Printf("Marking %s - %s... ", gap.Version, gap.Name)
 
-		// TODO: Implement direct record insertion
-		// This requires:
-		// 1. Finding the Migration object by version
-		// 2. Creating MigrationMetadata with action="manual"
-		// 3. Calling driver.Record() directly
-		// For now, return error
+		m := q.FindMigration(gap.Version)
+		if m == nil {
+			fmt.Printf("SKIP (not registered in code)\n")
+			continue
+		}
 
-		fmt.Printf("NOT IMPLEMENTED\n")
+		meta := &queen.MigrationMetadata{
+			AppliedBy: currentUser,
+			Action:    "mark-applied",
+			Status:    "success",
+		}
+
+		if err := q.Driver().Record(ctx, m, meta); err != nil {
+			fmt.Printf("FAILED: %v\n", err)
+			return fmt.Errorf("failed to mark migration %s: %w", gap.Version, err)
+		}
+
+		fmt.Printf("OK\n")
+		successCount++
 	}
 
-	return fmt.Errorf("--mark-applied is not yet fully implemented - use 'queen up' to apply migrations properly")
+	fmt.Println()
+	fmt.Printf("Successfully marked %d migration(s) as applied\n", successCount)
+	return nil
 }

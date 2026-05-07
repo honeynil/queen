@@ -1,23 +1,75 @@
 // Package tui provides a terminal UI for Queen migrations.
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+)
 
 var (
-	primaryColor   = lipgloss.Color("#7D56F4")
-	secondaryColor = lipgloss.Color("#04B575")
-	warningColor   = lipgloss.Color("#FFAA00")
-	errorColor     = lipgloss.Color("#FF0000")
-	grayColor      = lipgloss.Color("#666666")
-	whiteColor     = lipgloss.Color("#FFFFFF")
+	// Color palette — softer, Tailwind-inspired
+	primaryColor   = lipgloss.Color("#8B5CF6")
+	accentColor    = lipgloss.Color("#A78BFA")
+	successColor   = lipgloss.Color("#10B981")
+	warningColor   = lipgloss.Color("#F59E0B")
+	errorColor     = lipgloss.Color("#EF4444")
+	dimColor       = lipgloss.Color("#6B7280")
+	subtleBg       = lipgloss.Color("#1E1E2E")
+	borderColor    = lipgloss.Color("#4B5563")
+	textColor      = lipgloss.Color("#F9FAFB")
+	mutedTextColor = lipgloss.Color("#9CA3AF")
+	selectedBg     = lipgloss.Color("#2D2B55")
 
+	// Header
+	HeaderStyle = lipgloss.NewStyle().
+			Background(subtleBg).
+			Foreground(textColor).
+			Padding(0, 2)
+
+	AppTitleStyle = lipgloss.NewStyle().
+			Foreground(primaryColor).
+			Bold(true)
+
+	AppSubtitleStyle = lipgloss.NewStyle().
+				Foreground(mutedTextColor)
+
+	// Tab bar
+	ActiveTabStyle = lipgloss.NewStyle().
+			Background(primaryColor).
+			Foreground(textColor).
+			Bold(true).
+			Padding(0, 1)
+
+	InactiveTabStyle = lipgloss.NewStyle().
+				Foreground(mutedTextColor).
+				Padding(0, 1)
+
+	TabBadgeStyle = lipgloss.NewStyle().
+			Foreground(warningColor).
+			Bold(true)
+
+	// Footer
+	FooterStyle = lipgloss.NewStyle().
+			Background(subtleBg).
+			Foreground(dimColor).
+			Padding(0, 2)
+
+	FooterKeyStyle = lipgloss.NewStyle().
+			Foreground(accentColor).
+			Bold(true)
+
+	FooterDescStyle = lipgloss.NewStyle().
+			Foreground(dimColor)
+
+	// Content styles
 	TitleStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(primaryColor).
 			MarginBottom(1)
 
 	AppliedStyle = lipgloss.NewStyle().
-			Foreground(secondaryColor).
+			Foreground(successColor).
 			Bold(true)
 
 	PendingStyle = lipgloss.NewStyle().
@@ -28,34 +80,91 @@ var (
 			Foreground(errorColor).
 			Bold(true)
 
+	// List items
 	SelectedStyle = lipgloss.NewStyle().
-			Background(primaryColor).
-			Foreground(whiteColor).
-			Bold(true).
-			Padding(0, 1)
+			Background(selectedBg).
+			Bold(true)
 
-	NormalStyle = lipgloss.NewStyle().
-			Padding(0, 1)
+	NormalStyle = lipgloss.NewStyle()
 
-	HelpStyle = lipgloss.NewStyle().
-			Foreground(grayColor).
-			MarginTop(1)
+	VersionStyle = lipgloss.NewStyle().
+			Foreground(accentColor)
 
+	NameStyle = lipgloss.NewStyle().
+			Foreground(mutedTextColor)
+
+	DetailStyle = lipgloss.NewStyle().
+			Foreground(dimColor)
+
+	// Progress bar
+	ProgressFilledStyle = lipgloss.NewStyle().
+				Foreground(successColor)
+
+	ProgressEmptyStyle = lipgloss.NewStyle().
+				Foreground(borderColor)
+
+	// Scroll indicators
+	ScrollIndicatorStyle = lipgloss.NewStyle().
+				Foreground(dimColor).
+				Italic(true)
+
+	// Messages
+	SuccessMsgStyle = lipgloss.NewStyle().
+			Foreground(successColor).
+			Bold(true)
+
+	WarningMsgStyle = lipgloss.NewStyle().
+			Foreground(warningColor)
+
+	ErrorMsgStyle = lipgloss.NewStyle().
+			Foreground(errorColor).
+			Bold(true)
+
+	// Info box (used in help view)
 	InfoBoxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(primaryColor).
-			Padding(1, 2).
-			MarginTop(1)
+			BorderForeground(borderColor).
+			Padding(1, 3)
 
-	GapWarningStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(warningColor).
-			Padding(0, 1).
-			MarginTop(1)
+	// Gap type badges
+	GapTypeBadgeStyle = lipgloss.NewStyle().
+				Foreground(dimColor)
 
-	GapErrorStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(errorColor).
-			Padding(0, 1).
-			MarginTop(1)
+	// Destructive badge
+	DestructiveBadgeStyle = lipgloss.NewStyle().
+				Foreground(errorColor).
+				Bold(true)
+
+	// Rollback badge
+	RollbackBadgeStyle = lipgloss.NewStyle().
+				Foreground(successColor)
+
+	// Separator
+	SeparatorStyle = lipgloss.NewStyle().
+			Foreground(borderColor)
+
+	// Help key style
+	HelpKeyStyle = lipgloss.NewStyle().
+			Foreground(accentColor).
+			Bold(true)
+
+	HelpDescStyle = lipgloss.NewStyle().
+			Foreground(mutedTextColor)
+
+	HelpSectionStyle = lipgloss.NewStyle().
+				Foreground(primaryColor).
+				Bold(true)
 )
+
+// UI symbols
+const (
+	iconCursor   = "❯ "
+	iconSelected = "●"
+	iconEmpty    = "○"
+	keyDown      = "down"
+	keyEnter     = "enter"
+)
+
+func separator(width int) string {
+	return SeparatorStyle.Render(strings.Repeat("─", width))
+}

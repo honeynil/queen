@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/honeynil/queen"
 )
 
@@ -31,6 +33,10 @@ type Model struct {
 	height      int
 	err         error
 	quitting    bool
+
+	spinner       spinner.Model
+	spinnerActive bool
+	scrollOffset  int
 }
 
 type MessageType int
@@ -43,12 +49,18 @@ const (
 )
 
 func NewModel(q *queen.Queen, ctx context.Context) *Model {
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
+	sp.Style = lipgloss.NewStyle().Foreground(primaryColor)
+
 	return &Model{
-		queen:    q,
-		ctx:      ctx,
-		cursor:   0,
-		viewMode: ViewMigrations,
-		loading:  true,
+		queen:         q,
+		ctx:           ctx,
+		cursor:        0,
+		viewMode:      ViewMigrations,
+		loading:       true,
+		spinner:       sp,
+		spinnerActive: true,
 	}
 }
 
@@ -56,6 +68,7 @@ func (m *Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.loadMigrations(),
 		m.loadGaps(),
+		m.spinner.Tick,
 	)
 }
 
@@ -107,9 +120,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKeyPress(msg)
 
+	case spinner.TickMsg:
+		if m.spinnerActive {
+			var cmd tea.Cmd
+			m.spinner, cmd = m.spinner.Update(msg)
+			return m, cmd
+		}
+		return m, nil
+
 	case migrationsLoadedMsg:
 		m.migrations = msg.migrations
 		m.loading = false
+		m.spinnerActive = false
 		return m, nil
 
 	case gapsLoadedMsg:
@@ -121,17 +143,47 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.message = fmt.Sprintf("Error: %v", msg.err)
 		m.messageType = MessageError
 		m.loading = false
+		m.spinnerActive = false
 		return m, nil
 
 	case operationCompleteMsg:
 		m.message = msg.message
 		m.messageType = msg.messageType
 		m.loading = false
+		m.spinnerActive = false
 		// Reload data after operation
 		return m, tea.Batch(m.loadMigrations(), m.loadGaps())
 	}
 
 	return m, nil
+}
+
+// contentHeight returns how many list items fit in the visible area.
+func (m *Model) contentHeight() int {
+	// header(1) + tabbar(1) + separator(1) + stats+progress(2) + separator(1) + message(2) + footer(1) + padding(2)
+	overhead := 11
+	if m.message != "" {
+		overhead += 2
+	}
+	available := m.height - overhead
+	if available < 3 {
+		available = 3
+	}
+	return available
+}
+
+// adjustScroll keeps the cursor within the visible window.
+func (m *Model) adjustScroll() {
+	visible := m.contentHeight()
+	if m.cursor < m.scrollOffset {
+		m.scrollOffset = m.cursor
+	}
+	if m.cursor >= m.scrollOffset+visible {
+		m.scrollOffset = m.cursor - visible + 1
+	}
+	if m.scrollOffset < 0 {
+		m.scrollOffset = 0
+	}
 }
 
 // handleKeyPress handles keyboard input.
@@ -148,6 +200,7 @@ func (m *Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
+			m.adjustScroll()
 		}
 
 	case "down", "j":
@@ -160,10 +213,12 @@ func (m *Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.cursor < maxCursor {
 			m.cursor++
+			m.adjustScroll()
 		}
 
 	case "g":
 		m.cursor = 0
+		m.scrollOffset = 0
 
 	case "G":
 		switch m.viewMode {
@@ -176,27 +231,31 @@ func (m *Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.cursor = len(m.gaps) - 1
 			}
 		}
+		m.adjustScroll()
 
 	case "1":
 		m.viewMode = ViewMigrations
 		m.cursor = 0
+		m.scrollOffset = 0
 		m.message = ""
 
 	case "2":
 		m.viewMode = ViewGaps
 		m.cursor = 0
+		m.scrollOffset = 0
 		m.message = ""
 
 	case "3", "?":
 		m.viewMode = ViewHelp
 		m.cursor = 0
+		m.scrollOffset = 0
 		m.message = ""
 
 	case "r":
 		m.loading = true
-		m.message = "Reloading..."
-		m.messageType = MessageInfo
-		return m, tea.Batch(m.loadMigrations(), m.loadGaps())
+		m.spinnerActive = true
+		m.message = ""
+		return m, tea.Batch(m.loadMigrations(), m.loadGaps(), m.spinner.Tick)
 
 	case "enter":
 		return m.handleAction()
@@ -260,7 +319,8 @@ func (m *Model) applyMigration() (tea.Model, tea.Cmd) {
 	}
 
 	m.loading = true
-	return m, func() tea.Msg {
+	m.spinnerActive = true
+	return m, tea.Batch(func() tea.Msg {
 		// Count steps to this migration
 		steps := 0
 		for i := 0; i <= m.cursor; i++ {
@@ -280,7 +340,7 @@ func (m *Model) applyMigration() (tea.Model, tea.Cmd) {
 			message:     fmt.Sprintf("Applied migration %s", migration.Version),
 			messageType: MessageSuccess,
 		}
-	}
+	}, m.spinner.Tick)
 }
 
 // rollbackMigration rolls back the selected migration.
@@ -297,7 +357,8 @@ func (m *Model) rollbackMigration() (tea.Model, tea.Cmd) {
 	}
 
 	m.loading = true
-	return m, func() tea.Msg {
+	m.spinnerActive = true
+	return m, tea.Batch(func() tea.Msg {
 		// Count steps from this migration
 		steps := 0
 		for i := m.cursor; i < len(m.migrations); i++ {
@@ -317,7 +378,7 @@ func (m *Model) rollbackMigration() (tea.Model, tea.Cmd) {
 			message:     fmt.Sprintf("Rolled back %d migration(s)", steps),
 			messageType: MessageSuccess,
 		}
-	}
+	}, m.spinner.Tick)
 }
 
 // fillGap fills the selected gap.
@@ -328,8 +389,9 @@ func (m *Model) fillGap() (tea.Model, tea.Cmd) {
 
 	gap := m.gaps[m.cursor]
 	m.loading = true
+	m.spinnerActive = true
 
-	return m, func() tea.Msg {
+	return m, tea.Batch(func() tea.Msg {
 		// Get migration statuses
 		statuses, err := m.queen.Status(m.ctx)
 		if err != nil {
@@ -373,7 +435,7 @@ func (m *Model) fillGap() (tea.Model, tea.Cmd) {
 			message:     fmt.Sprintf("Filled gap: %s", gap.Version),
 			messageType: MessageSuccess,
 		}
-	}
+	}, m.spinner.Tick)
 }
 
 // ignoreGap ignores the selected gap.
@@ -384,8 +446,9 @@ func (m *Model) ignoreGap() (tea.Model, tea.Cmd) {
 
 	gap := m.gaps[m.cursor]
 	m.loading = true
+	m.spinnerActive = true
 
-	return m, func() tea.Msg {
+	return m, tea.Batch(func() tea.Msg {
 		qi, err := queen.LoadQueenIgnore()
 		if err != nil {
 			// Create new one if doesn't exist
@@ -403,13 +466,13 @@ func (m *Model) ignoreGap() (tea.Model, tea.Cmd) {
 			message:     fmt.Sprintf("Ignored gap: %s", gap.Version),
 			messageType: MessageSuccess,
 		}
-	}
+	}, m.spinner.Tick)
 }
 
 // View renders the UI.
 func (m *Model) View() string {
 	if m.quitting {
-		return "Goodbye!\n"
+		return ""
 	}
 
 	switch m.viewMode {

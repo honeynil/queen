@@ -16,7 +16,6 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-// TestQuoteIdentifier tests the identifier quoting function.
 func TestQuoteIdentifier(t *testing.T) {
 	t.Parallel()
 
@@ -62,7 +61,6 @@ func TestQuoteIdentifier(t *testing.T) {
 	}
 }
 
-// TestDriverCreation tests driver creation functions.
 func TestDriverCreation(t *testing.T) {
 	t.Parallel()
 
@@ -70,10 +68,9 @@ func TestDriverCreation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("an error '%s' was not expected when opening a mock database connection", err)
 	}
-	_ = db.Close()
+	defer func() { _ = db.Close() }()
 
 	t.Run("New creates driver with default table name", func(t *testing.T) {
-		t.Parallel()
 		driver := New(db)
 		if driver.DB != db {
 			t.Error("driver.db should be set")
@@ -81,16 +78,279 @@ func TestDriverCreation(t *testing.T) {
 		if driver.TableName != "queen_migrations" {
 			t.Errorf("driver.TableName = %q; want %q", driver.TableName, "queen_migrations")
 		}
+		expectedLockID := hashTableName("queen_migrations")
+		if driver.lockID != expectedLockID {
+			t.Errorf("driver.lockID = %d; want %d", driver.lockID, expectedLockID)
+		}
 	})
 
 	t.Run("NewWithTableName creates driver with custom table name", func(t *testing.T) {
-		t.Parallel()
 		driver := NewWithTableName(db, "custom_migrations")
 		if driver.DB != db {
 			t.Error("driver.db should be set")
 		}
 		if driver.TableName != "custom_migrations" {
 			t.Errorf("driver.TableName = %q; want %q", driver.TableName, "custom_migrations")
+		}
+		expectedLockID := hashTableName("custom_migrations")
+		if driver.lockID != expectedLockID {
+			t.Errorf("driver.lockID = %d; want %d", driver.lockID, expectedLockID)
+		}
+	})
+}
+
+func TestHashTableName(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected int64
+	}{
+		{"default table", "queen_migrations", hashTableName("queen_migrations")},
+		{"custom table", "custom_migrations", hashTableName("custom_migrations")},
+		{"empty", "", hashTableName("")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := hashTableName(tt.input)
+			if result != tt.expected {
+				t.Errorf("hashTableName(%q) = %d; want %d", tt.input, result, tt.expected)
+			}
+			result2 := hashTableName(tt.input)
+			if result != result2 {
+				t.Error("hashTableName is not deterministic")
+			}
+		})
+	}
+
+	t.Run("different names produce different hashes", func(t *testing.T) {
+		hash1 := hashTableName("table1")
+		hash2 := hashTableName("table2")
+		if hash1 == hash2 {
+			t.Error("different table names should produce different hashes")
+		}
+	})
+}
+
+func TestInit(t *testing.T) {
+	t.Run("creates migrations table successfully", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		mock.ExpectExec(`CREATE TABLE IF NOT EXISTS "queen_migrations"`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		for i := 0; i < 7; i++ {
+			mock.ExpectExec(`ALTER TABLE "queen_migrations" ADD COLUMN`).
+				WillReturnResult(sqlmock.NewResult(0, 0))
+		}
+
+		err = driver.Init(ctx)
+		if err != nil {
+			t.Errorf("Init() failed: %v", err)
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+
+	t.Run("handles CREATE TABLE error", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		createErr := errors.New("create table failed")
+		mock.ExpectExec(`CREATE TABLE IF NOT EXISTS "queen_migrations"`).
+			WillReturnError(createErr)
+
+		err = driver.Init(ctx)
+		if !errors.Is(err, createErr) {
+			t.Errorf("Init() error = %v; want %v", err, createErr)
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+
+	t.Run("continues on ALTER TABLE errors (idempotent)", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		mock.ExpectExec(`CREATE TABLE IF NOT EXISTS "queen_migrations"`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		for i := 0; i < 7; i++ {
+			mock.ExpectExec(`ALTER TABLE "queen_migrations" ADD COLUMN`).
+				WillReturnError(errors.New("column already exists"))
+		}
+
+		err = driver.Init(ctx)
+		if err != nil {
+			t.Errorf("Init() should not fail on ALTER errors: %v", err)
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+}
+
+func TestLock(t *testing.T) {
+	t.Run("acquires advisory lock successfully", func(t *testing.T) {
+		db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		mock.ExpectExec("SELECT pg_advisory_lock").
+			WithArgs(driver.lockID).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		err = driver.Lock(ctx, 5*time.Second)
+		if err != nil {
+			t.Errorf("Lock() failed: %v", err)
+		}
+
+		if driver.lockConn == nil {
+			t.Error("lockConn should be set after successful lock")
+		}
+
+		_ = driver.lockConn.Close()
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+
+	t.Run("handles timeout correctly", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		mock.ExpectExec("SELECT pg_advisory_lock").
+			WillDelayFor(2 * time.Second).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		err = driver.Lock(ctx, 100*time.Millisecond)
+		if !errors.Is(err, queen.ErrLockTimeout) {
+			t.Errorf("Lock() error = %v; want ErrLockTimeout", err)
+		}
+	})
+}
+
+func TestUnlock(t *testing.T) {
+	t.Run("unlocks successfully when locked", func(t *testing.T) {
+		db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		mock.ExpectExec("SELECT pg_advisory_lock").
+			WithArgs(driver.lockID).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		err = driver.Lock(ctx, 5*time.Second)
+		if err != nil {
+			t.Fatalf("Lock() failed: %v", err)
+		}
+
+		mock.ExpectExec("SELECT pg_advisory_unlock").
+			WithArgs(driver.lockID).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		err = driver.Unlock(ctx)
+		if err != nil {
+			t.Errorf("Unlock() failed: %v", err)
+		}
+
+		if driver.lockConn != nil {
+			t.Error("lockConn should be nil after unlock")
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+
+	t.Run("gracefully handles unlock when not locked", func(t *testing.T) {
+		db, _, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		err = driver.Unlock(ctx)
+		if err != nil {
+			t.Errorf("Unlock() when not locked should be graceful, got error: %v", err)
+		}
+	})
+
+	t.Run("handles unlock error", func(t *testing.T) {
+		db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		mock.ExpectExec("SELECT pg_advisory_lock").
+			WithArgs(driver.lockID).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		err = driver.Lock(ctx, 5*time.Second)
+		if err != nil {
+			t.Fatalf("Lock() failed: %v", err)
+		}
+
+		unlockErr := errors.New("unlock failed")
+		mock.ExpectExec("SELECT pg_advisory_unlock").
+			WithArgs(driver.lockID).
+			WillReturnError(unlockErr)
+
+		err = driver.Unlock(ctx)
+		if err == nil {
+			t.Error("Unlock() should return error when unlock fails")
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
 		}
 	})
 }
@@ -107,7 +367,6 @@ func TestInvalidMigrations(t *testing.T) {
 	driver := New(db)
 	q := queen.New(driver)
 
-	// Test empty version
 	t.Run("EmptyVersion", func(t *testing.T) {
 		err := q.Add(queen.M{
 			Version: "",
@@ -142,7 +401,6 @@ func TestInvalidMigrations(t *testing.T) {
 		}
 	})
 
-	// Test version with spaces
 	t.Run("VersionWithSpaces", func(t *testing.T) {
 		err := q.Add(queen.M{
 			Version: "003 with spaces",
@@ -160,9 +418,8 @@ func TestInvalidMigrations(t *testing.T) {
 		}
 	})
 
-	// Test migration name > 63 characters
 	t.Run("LongMigrationName", func(t *testing.T) {
-		longName := strings.Repeat("a", 64) // 64 characters
+		longName := strings.Repeat("a", 64)
 		err := q.Add(queen.M{
 			Version: "004",
 			Name:    longName,
@@ -179,7 +436,6 @@ func TestInvalidMigrations(t *testing.T) {
 		}
 	})
 
-	// Test special characters in version
 	t.Run("SpecialCharsInVersion", func(t *testing.T) {
 		err := q.Add(queen.M{
 			Version: "005@№;%!4special",
@@ -197,7 +453,6 @@ func TestInvalidMigrations(t *testing.T) {
 		}
 	})
 
-	// Test special characters in name
 	t.Run("SpecialCharsInName", func(t *testing.T) {
 		err := q.Add(queen.M{
 			Version: "006",
@@ -215,7 +470,6 @@ func TestInvalidMigrations(t *testing.T) {
 		}
 	})
 
-	// Test duplicate versions
 	t.Run("DuplicateVersions", func(t *testing.T) {
 		err := q.Add(queen.M{
 			Version: "007",
@@ -247,7 +501,6 @@ func TestInvalidMigrations(t *testing.T) {
 func setupTestDB(t *testing.T) (*sql.DB, func()) {
 	t.Helper()
 
-	// Connect to PostgreSQL (using port 5432 to avoid conflicts)
 	dsn := os.Getenv("POSTGRESQL_TEST_DSN")
 
 	db, err := sql.Open("pgx", dsn)
@@ -255,7 +508,6 @@ func setupTestDB(t *testing.T) (*sql.DB, func()) {
 		t.Skip("PostgreSQL not available:", err)
 	}
 
-	// Verify connection
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -264,7 +516,6 @@ func setupTestDB(t *testing.T) (*sql.DB, func()) {
 		t.Skip("PostgreSQL not available:", err)
 	}
 
-	// Cleanup function
 	cleanup := func() {
 		var errs []error
 
@@ -299,7 +550,6 @@ func TestIntegrationInit(t *testing.T) {
 		t.Fatalf("Init() failed: %v", err)
 	}
 
-	// Verify table exists
 	var tableName string
 	err = db.QueryRowContext(ctx,
 		"SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'queen_migrations';").Scan(&tableName)
@@ -307,7 +557,6 @@ func TestIntegrationInit(t *testing.T) {
 		t.Fatalf("migrations table was not created: %v", err)
 	}
 
-	// Init should be idempotent
 	err = driver.Init(ctx)
 	if err != nil {
 		t.Fatalf("second Init() failed: %v", err)
@@ -325,7 +574,6 @@ func TestRecordAndGetApplied(t *testing.T) {
 		t.Fatalf("Init() failed: %v", err)
 	}
 
-	// Initially should have no migrations
 	applied, err := driver.GetApplied(ctx)
 	if err != nil {
 		t.Fatalf("GetApplied() failed: %v", err)
@@ -334,7 +582,6 @@ func TestRecordAndGetApplied(t *testing.T) {
 		t.Errorf("expected 0 migrations, got %d", len(applied))
 	}
 
-	// Record a migration
 	m1 := &queen.Migration{
 		Version: "001",
 		Name:    "create_users",
@@ -346,7 +593,6 @@ func TestRecordAndGetApplied(t *testing.T) {
 		t.Fatalf("Record() failed: %v", err)
 	}
 
-	// Should now have 1 migration
 	applied, err = driver.GetApplied(ctx)
 	if err != nil {
 		t.Fatalf("GetApplied() failed: %v", err)
@@ -361,7 +607,6 @@ func TestRecordAndGetApplied(t *testing.T) {
 		t.Errorf("name = %q; want %q", applied[0].Name, "create_users")
 	}
 
-	// Record another migration
 	m2 := &queen.Migration{
 		Version: "002",
 		Name:    "create_posts",
@@ -373,7 +618,6 @@ func TestRecordAndGetApplied(t *testing.T) {
 		t.Fatalf("Record() failed: %v", err)
 	}
 
-	// Should now have 2 migrations in order
 	applied, err = driver.GetApplied(ctx)
 	if err != nil {
 		t.Fatalf("GetApplied() failed: %v", err)
@@ -381,7 +625,6 @@ func TestRecordAndGetApplied(t *testing.T) {
 	if len(applied) != 2 {
 		t.Fatalf("expected 2 migrations, got %d", len(applied))
 	}
-	// Should be sorted by applied_at
 	if applied[0].Version != "001" {
 		t.Errorf("first version = %q; want %q", applied[0].Version, "001")
 	}
@@ -397,7 +640,6 @@ func TestIntegrationRemove(t *testing.T) {
 	driver := New(db)
 	ctx := context.Background()
 
-	// Init and record a migration
 	if err := driver.Init(ctx); err != nil {
 		t.Fatalf("Init() failed: %v", err)
 	}
@@ -413,18 +655,15 @@ func TestIntegrationRemove(t *testing.T) {
 		t.Fatalf("Record() failed: %v", err)
 	}
 
-	// Verify it was recorded
 	applied, _ := driver.GetApplied(ctx)
 	if len(applied) != 1 {
 		t.Fatalf("expected 1 migration, got %d", len(applied))
 	}
 
-	// Remove the migration
 	if err := driver.Remove(ctx, "001"); err != nil {
 		t.Fatalf("Remove() failed: %v", err)
 	}
 
-	// Should now be empty
 	applied, err := driver.GetApplied(ctx)
 	if err != nil {
 		t.Fatalf("GetApplied() failed: %v", err)
@@ -445,13 +684,11 @@ func TestIntegrationLocking(t *testing.T) {
 		t.Fatalf("Init() failed: %v", err)
 	}
 
-	// Acquire lock
 	err := driver.Lock(ctx, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Lock() failed: %v", err)
 	}
 
-	// Try to acquire the same lock from another driver instance (should fail)
 	db2, err := sql.Open("pgx", os.Getenv("POSTGRESQL_TEST_DSN"))
 	if err != nil {
 		t.Fatalf("failed to open second connection: %v", err)
@@ -465,18 +702,15 @@ func TestIntegrationLocking(t *testing.T) {
 		t.Errorf("expected ErrLockTimeout, got %v", err)
 	}
 
-	// Release lock
 	if err := driver.Unlock(ctx); err != nil {
 		t.Fatalf("Unlock() failed: %v", err)
 	}
 
-	// Now the second driver should be able to acquire the lock
 	err = driver2.Lock(ctx, 5*time.Second)
 	if err != nil {
 		t.Fatalf("second Lock() failed after unlock: %v", err)
 	}
 
-	// Clean up
 	_ = driver2.Unlock(ctx)
 }
 
@@ -491,7 +725,6 @@ func TestIntegrationExec(t *testing.T) {
 		t.Fatalf("Init() failed: %v", err)
 	}
 
-	// Test successful transaction
 	err := driver.Exec(ctx, sql.LevelDefault, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 			CREATE TABLE test_users (
@@ -505,7 +738,6 @@ func TestIntegrationExec(t *testing.T) {
 		t.Fatalf("Exec() failed: %v", err)
 	}
 
-	// Verify table was created
 	var tableName string
 	err = db.QueryRowContext(ctx,
 		"SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'test_users';").Scan(&tableName)
@@ -518,7 +750,6 @@ func TestIntegrationExec(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		// Return error to trigger rollback
 		return sql.ErrTxDone
 	})
 	if err == nil {
@@ -535,7 +766,6 @@ func TestIntegrationFullMigrationCycle(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Add migrations
 	q.MustAdd(queen.M{
 		Version: "001",
 		Name:    "create_users",
@@ -562,12 +792,10 @@ func TestIntegrationFullMigrationCycle(t *testing.T) {
 		DownSQL: `DROP TABLE test_posts`,
 	})
 
-	// Apply all migrations
 	if err := q.Up(ctx); err != nil {
 		t.Fatalf("Up() failed: %v", err)
 	}
 
-	// Verify tables exist
 	var tableCount uint64
 	err := db.QueryRowContext(ctx,
 		"SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('test_users', 'test_posts');").Scan(&tableCount)
@@ -578,7 +806,6 @@ func TestIntegrationFullMigrationCycle(t *testing.T) {
 		t.Errorf("expected 2 tables, got %d", tableCount)
 	}
 
-	// Check status
 	statuses, err := q.Status(ctx)
 	if err != nil {
 		t.Fatalf("Status() failed: %v", err)
@@ -592,12 +819,10 @@ func TestIntegrationFullMigrationCycle(t *testing.T) {
 		}
 	}
 
-	// Rollback all migrations
 	if err := q.Reset(ctx); err != nil {
 		t.Fatalf("Reset() failed: %v", err)
 	}
 
-	// Verify tables are gone
 	err = db.QueryRowContext(ctx,
 		"SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('test_users', 'test_posts');").Scan(&tableCount)
 	if err != nil {
@@ -619,7 +844,6 @@ func TestTimestampParsing(t *testing.T) {
 		t.Fatalf("Init() failed: %v", err)
 	}
 
-	// Record a migration
 	m := &queen.Migration{
 		Version: "001",
 		Name:    "test_migration",
@@ -631,7 +855,6 @@ func TestTimestampParsing(t *testing.T) {
 		t.Fatalf("Record() failed: %v", err)
 	}
 
-	// Get applied migrations
 	applied, err := driver.GetApplied(ctx)
 	if err != nil {
 		t.Fatalf("GetApplied() failed: %v", err)
@@ -641,12 +864,10 @@ func TestTimestampParsing(t *testing.T) {
 		t.Fatalf("expected 1 migration, got %d", len(applied))
 	}
 
-	// Verify timestamp was parsed correctly
 	if applied[0].AppliedAt.IsZero() {
 		t.Error("AppliedAt should not be zero")
 	}
 
-	// Verify timestamp is recent (within last minute)
 	elapsed := time.Since(applied[0].AppliedAt)
 	if elapsed > time.Minute {
 		t.Errorf("AppliedAt timestamp seems incorrect: %v (elapsed: %v)", applied[0].AppliedAt, elapsed)
@@ -664,7 +885,6 @@ func TestUnlock_WhenNotLocked(t *testing.T) {
 		t.Fatalf("Init() failed: %v", err)
 	}
 
-	// Try to unlock when not locked - should be graceful and not return error
 	err := driver.Unlock(ctx)
 	if err != nil {
 		t.Errorf("expected nil when unlocking without lock (graceful), got: %v", err)
@@ -681,15 +901,13 @@ func TestLock_ContextCancellation(t *testing.T) {
 		t.Fatalf("Init() failed: %v", err)
 	}
 
-	// Acquire lock
 	if err := driver.Lock(context.Background(), 5*time.Second); err != nil {
 		t.Fatalf("Lock() failed: %v", err)
 	}
 	defer func() { _ = driver.Unlock(context.Background()) }()
 
-	// Try to acquire lock with canceled context
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately
+	cancel()
 
 	err := driver.Lock(ctx, 5*time.Second)
 	if err == nil {

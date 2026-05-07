@@ -111,13 +111,13 @@ func (app *App) migrateDownTo(ctx context.Context, q *queen.Queen, statuses []qu
 			if statuses[i].Status == queen.StatusApplied {
 				marker := "↓"
 				if statuses[i].Destructive {
-					marker = "⚠ ↓"
+					marker = "WARNING:"
 				}
 				fmt.Printf("  %s %s - %s\n", marker, statuses[i].Version, statuses[i].Name)
 			}
 		}
 		if hasDestructive {
-			fmt.Println("\n⚠  Warning: Some migrations contain destructive operations")
+			fmt.Println("\nWARNING: Some migrations contain destructive operations")
 		}
 		fmt.Println()
 

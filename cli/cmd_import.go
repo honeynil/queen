@@ -24,7 +24,7 @@ func (app *App) importCmd() *cobra.Command {
 			sourcePath := args[0]
 
 			if fromTool == "" {
-				return fmt.Errorf("--from flag is required (goose, golang-migrate, flyway, liquibase)")
+				return fmt.Errorf("--from flag is required (goose)")
 			}
 
 			if output == "" {
@@ -48,15 +48,13 @@ func (app *App) importCmd() *cobra.Command {
 			switch fromTool {
 			case "goose":
 				return importFromGoose(sourcePath, output, dryRun)
-			case "golang-migrate":
-				return importFromGolangMigrate(sourcePath, output, dryRun)
 			default:
-				return fmt.Errorf("unsupported tool: %s", fromTool)
+				return fmt.Errorf("unsupported tool: %s (supported: goose)", fromTool)
 			}
 		},
 	}
 
-	cmd.Flags().StringVar(&fromTool, "from", "", "Migration tool to import from (goose, golang-migrate, flyway, liquibase)")
+	cmd.Flags().StringVar(&fromTool, "from", "", "Migration tool to import from (goose)")
 	cmd.Flags().StringVar(&output, "output", "", "Output directory for Queen migrations (default: migrations)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview import without making changes")
 
@@ -92,7 +90,7 @@ func importFromGoose(sourcePath, output string, dryRun bool) error {
 
 		parts := strings.SplitN(basename, "_", 2)
 		if len(parts) < 2 {
-			fmt.Printf("  ⚠ Skipping %s (invalid format)\n", basename)
+			fmt.Printf("  WARNING: Skipping %s (invalid format)\n", basename)
 			continue
 		}
 
@@ -101,7 +99,7 @@ func importFromGoose(sourcePath, output string, dryRun bool) error {
 
 		content, err := os.ReadFile(file)
 		if err != nil {
-			fmt.Printf("  ⚠ Skipping %s (failed to read)\n", basename)
+			fmt.Printf("  WARNING: Skipping %s (failed to read)\n", basename)
 			continue
 		}
 
@@ -115,7 +113,7 @@ func importFromGoose(sourcePath, output string, dryRun bool) error {
 			downSQL: downSQL,
 		})
 
-		fmt.Printf("  ✓ %s\n", basename)
+		fmt.Printf("  %s\n", basename)
 		if dryRun {
 			fmt.Printf("    Version: %s, Name: %s\n", version, namePart)
 		}
@@ -144,12 +142,19 @@ func importFromGoose(sourcePath, output string, dryRun bool) error {
 	for i, m := range migrations {
 		queenVersion := fmt.Sprintf("%03d", i+1)
 		filename := fmt.Sprintf("%s_%s.go", queenVersion, m.name)
-		funcName := fmt.Sprintf("Register%s%s", strings.ToUpper(queenVersion[:1]), queenVersion[1:])
+		funcName := "Register" + queenVersion
+		capitalizeNext := true
 		for _, r := range m.name {
-			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			if r == '_' || r == '-' {
+				capitalizeNext = true
+				continue
+			}
+			if capitalizeNext && r >= 'a' && r <= 'z' {
+				funcName += string(r - 32) // to uppercase
+				capitalizeNext = false
+			} else if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
 				funcName += string(r)
-			} else if r == '_' || r == '-' {
-				funcName += "_"
+				capitalizeNext = false
 			}
 		}
 
@@ -160,7 +165,7 @@ func importFromGoose(sourcePath, output string, dryRun bool) error {
 			return fmt.Errorf("failed to write %s: %w", filename, err)
 		}
 
-		fmt.Printf("  ✓ Created %s\n", filename)
+		fmt.Printf("  Created %s\n", filename)
 		registrationCalls = append(registrationCalls, fmt.Sprintf("\t%s(q)", funcName))
 	}
 
@@ -171,9 +176,9 @@ func importFromGoose(sourcePath, output string, dryRun bool) error {
 		return fmt.Errorf("failed to write migrations.go: %w", err)
 	}
 
-	fmt.Printf("  ✓ Created migrations.go\n")
+	fmt.Printf("  Created migrations.go\n")
 	fmt.Println()
-	fmt.Printf("✓ Successfully imported %d migration(s) from goose\n", len(migrations))
+	fmt.Printf("Successfully imported %d migration(s) from goose\n", len(migrations))
 	fmt.Println()
 	fmt.Println("Next steps:")
 	fmt.Println("  1. Review the generated files in", output+"/")
@@ -255,37 +260,4 @@ func Register(q *queen.Queen) {
 %s
 }
 `, registrationCalls)
-}
-
-func importFromGolangMigrate(sourcePath, _ string, dryRun bool) error {
-	fmt.Println("Golang-migrate import...")
-
-	upFiles, err := filepath.Glob(filepath.Join(sourcePath, "*.up.sql"))
-	if err != nil {
-		return fmt.Errorf("failed to scan files: %w", err)
-	}
-
-	if len(upFiles) == 0 {
-		return fmt.Errorf("no golang-migrate files found in %s", sourcePath)
-	}
-
-	fmt.Printf("Found %d up migration(s)\n\n", len(upFiles))
-
-	for _, upFile := range upFiles {
-		basename := filepath.Base(upFile)
-		downFile := strings.Replace(upFile, ".up.sql", ".down.sql", 1)
-
-		fmt.Printf("  • %s\n", basename)
-		if _, err := os.Stat(downFile); err == nil {
-			fmt.Printf("    (with down migration)\n")
-		}
-	}
-
-	if dryRun {
-		fmt.Println()
-		fmt.Println("Run without --dry-run to execute conversion")
-		return nil
-	}
-
-	return fmt.Errorf("golang-migrate import not yet fully implemented - coming soon")
 }

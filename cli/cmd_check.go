@@ -112,7 +112,7 @@ func (app *App) checkCmd() *cobra.Command {
 				fmt.Printf("Checks: %d passed, %d failed\n", passed, failed)
 				os.Exit(exitCode)
 			} else {
-				fmt.Printf("✓ All checks passed (%d/%d)\n", passed, passed)
+				fmt.Printf("All checks passed (%d/%d)\n", passed, passed)
 			}
 
 			return nil

@@ -53,12 +53,12 @@ func (app *App) outputExplainTable(plan *queen.MigrationPlan) {
 	fmt.Printf("Checksum:      %s\n", plan.Checksum)
 
 	if plan.IsDestructive {
-		fmt.Printf("Destructive:   ⚠️  YES\n")
+		fmt.Printf("Destructive:   WARNING: YES\n")
 	}
 
 	if len(plan.Warnings) > 0 {
 		fmt.Println()
-		fmt.Println("⚠️  Warnings:")
+		fmt.Println("WARNING: Warnings:")
 		for _, warning := range plan.Warnings {
 			fmt.Printf("  - %s\n", warning)
 		}
