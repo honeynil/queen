@@ -34,7 +34,7 @@ func (app *App) initCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&driver, "driver", "", "Database driver (postgres, mysql, sqlite, clickhouse, mssql)")
+	cmd.Flags().StringVar(&driver, "driver", "", "Database driver (postgres, mysql, sqlite, clickhouse, cockroachdb, mssql)")
 	cmd.Flags().BoolVar(&withConfig, "with-config", false, "Create .queen.yaml configuration file")
 	cmd.Flags().BoolVar(&interactive, "interactive", false, "Interactive setup wizard")
 	cmd.Flags().StringVar(&migrationsDir, "migrations-dir", "migrations", "Migrations directory name")
@@ -167,6 +167,7 @@ import (
 	// _ "github.com/go-sql-driver/mysql" // MySQL
 	// _ "github.com/mattn/go-sqlite3" // SQLite
 	// _ "github.com/ClickHouse/clickhouse-go/v2" // ClickHouse
+	// _ "github.com/jackc/pgx/v5/stdlib" // CockroachDB
 	// _ "github.com/microsoft/go-mssqldb" // MSSQL
 )
 
@@ -193,9 +194,11 @@ func createConfigFile(driver string) error {
 		dsnExample = "user:pass@tcp(localhost:3306)/dbname?parseTime=true"
 	case DriverSQLite:
 		dsnExample = "./app.db?_journal_mode=WAL"
-	case "clickhouse":
+	case DriverClickHouse:
 		dsnExample = "tcp://localhost:9000/dbname"
-	case "mssql":
+	case DriverCockroach:
+		dsnExample = "postgres://user:pass@localhost:26257/dbname?sslmode=disable"
+	case DriverMSSQL:
 		dsnExample = "sqlserver://user:pass@localhost:1433?database=dbname"
 	default:
 		dsnExample = "postgres://localhost/mydb"
