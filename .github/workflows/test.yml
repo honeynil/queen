@@ -40,6 +40,7 @@ jobs:
             - 'internal/**'
             - 'tests/integration/**'
             - 'drivers/base/**'
+            - 'drivers/mock/**'
           postgres:
             - 'drivers/postgres/**'
           mysql:
