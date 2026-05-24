@@ -518,7 +518,7 @@ The table lists what Queen's integration tests exercise today; it is not a forma
 
 ## Documentation
 
-Full documentation: [yaop-labs.github.io/queen-docs](https://yaop-labs.github.io/queen-docs/)
+Full documentation: [yaop-labs.github.io/queen-docs](https://yaop-labs.github.io/queen-docs/).
 
 ## License
 
