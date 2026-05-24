@@ -2,13 +2,10 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 
-	"github.com/honeynil/queen"
-	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
+	"github.com/yaop-labs/queen"
 )
 
 func (app *App) statusCmd() *cobra.Command {
@@ -16,23 +13,17 @@ func (app *App) statusCmd() *cobra.Command {
 		Use:   "status",
 		Short: "Show status of all registered migrations",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := context.Background()
+			return app.runWithQueen(cmd, func(ctx context.Context, q *queen.Queen) error {
+				statuses, err := q.Status(ctx)
+				if err != nil {
+					return fmt.Errorf("failed to get migration status: %w", err)
+				}
 
-			q, err := app.setupQueen(ctx)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = q.Close() }()
-
-			statuses, err := q.Status(ctx)
-			if err != nil {
-				return fmt.Errorf("failed to get migration status: %w", err)
-			}
-
-			if app.config.JSON {
-				return app.outputStatusJSON(statuses)
-			}
-			return app.outputStatusTable(statuses)
+				if app.config.JSON {
+					return app.outputStatusJSON(statuses)
+				}
+				return app.outputStatusTable(statuses)
+			})
 		},
 	}
 }
@@ -52,8 +43,7 @@ func countStatuses(statuses []queen.MigrationStatus) (applied, pending, modified
 }
 
 func (app *App) outputStatusTable(statuses []queen.MigrationStatus) error {
-	table := tablewriter.NewWriter(os.Stdout)
-	table.Header([]string{"Version", "Name", "Status", "Applied At", "Checksum", "Rollback"})
+	table := outputTable("Version", "Name", "Status", "Applied At", "Checksum", "Rollback")
 
 	for _, s := range statuses {
 		rollback := "no"
@@ -90,7 +80,7 @@ func (app *App) outputStatusTable(statuses []queen.MigrationStatus) error {
 	applied, pending, modified := countStatuses(statuses)
 	fmt.Printf("\nSummary: %d total, %d applied, %d pending", len(statuses), applied, pending)
 	if modified > 0 {
-		fmt.Printf(", %d modified (WARNING: WARNING)", modified)
+		fmt.Printf(", %d modified (warning)", modified)
 	}
 	fmt.Println()
 	return nil
@@ -116,7 +106,5 @@ func (app *App) outputStatusJSON(statuses []queen.MigrationStatus) error {
 	output.Summary.Pending = pending
 	output.Summary.Modified = modified
 
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(output)
+	return outputJSON(output)
 }

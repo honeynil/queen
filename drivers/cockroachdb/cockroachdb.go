@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/honeynil/queen"
-	"github.com/honeynil/queen/drivers/base"
+	"github.com/yaop-labs/queen"
+	"github.com/yaop-labs/queen/drivers/base"
 )
 
 // Driver implements the queen.Driver interface for CockroachDB.
@@ -97,13 +97,16 @@ func (d *Driver) Init(ctx context.Context) error {
 	return err
 }
 
-// Lock acquires a distributed lock to prevent concurrent migrations.
+// Lock uses a table row with expiry as the migration guard.
 func (d *Driver) Lock(ctx context.Context, timeout time.Duration) error {
 	cfg := base.TableLockConfig{
 		CleanupQuery: fmt.Sprintf(
 			"DELETE FROM %s WHERE lock_key = $1 AND expires_at < now()",
 			d.Config.QuoteIdentifier(d.lockTableName),
 		),
+		CleanupArgs: func(lockKey string, _ time.Time) []any {
+			return []any{lockKey}
+		},
 		CheckQuery: fmt.Sprintf(
 			"SELECT 1 FROM %s WHERE lock_key = $1 AND expires_at >= now() LIMIT 1",
 			d.Config.QuoteIdentifier(d.lockTableName),
@@ -115,7 +118,7 @@ func (d *Driver) Lock(ctx context.Context, timeout time.Duration) error {
 		ScanFunc: func(row *sql.Row) (bool, error) {
 			var exists int
 			err := row.Scan(&exists)
-			if err != nil && err != sql.ErrNoRows {
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return false, err
 			}
 			return exists != 0, nil

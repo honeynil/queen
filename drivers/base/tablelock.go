@@ -7,43 +7,39 @@ import (
 	"errors"
 	"time"
 
-	"github.com/honeynil/queen"
+	"github.com/yaop-labs/queen"
 )
 
 // TableLockConfig configures table-based distributed locking.
 type TableLockConfig struct {
 	CleanupQuery string
+	CleanupArgs  func(lockKey string, expiresAt time.Time) []any
 	CheckQuery   string
 	InsertQuery  string
 	ScanFunc     func(*sql.Row) (bool, error)
 }
 
-// AcquireTableLock implements distributed locking using a lock table.
-// Retries with exponential backoff until lock is acquired or timeout is reached.
+// AcquireTableLock retries a table-backed lock until it is acquired or times out.
 func AcquireTableLock(ctx context.Context, db *sql.DB, config TableLockConfig, lockKey, ownerID string, timeout time.Duration) error {
 	start := time.Now()
-	expiresAt := time.Now().Add(timeout)
 
 	backoff := 50 * time.Millisecond
 	maxBackoff := 1 * time.Second
 
 	for {
-		_, _ = db.ExecContext(ctx, config.CleanupQuery, lockKey, expiresAt)
-
-		row := db.QueryRowContext(ctx, config.CheckQuery, lockKey)
-		hasLock, err := config.ScanFunc(row)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			goto retry
-		}
-
-		if !hasLock {
-			_, err := db.ExecContext(ctx, config.InsertQuery, lockKey, expiresAt, ownerID)
-			if err == nil {
-				return nil
+		expiresAt := time.Now().Add(timeout)
+		if _, err := db.ExecContext(ctx, config.CleanupQuery, cleanupArgs(config, lockKey, expiresAt)...); err == nil {
+			row := db.QueryRowContext(ctx, config.CheckQuery, lockKey)
+			hasLock, err := config.ScanFunc(row)
+			if err == nil || errors.Is(err, sql.ErrNoRows) {
+				if !hasLock {
+					if _, err := db.ExecContext(ctx, config.InsertQuery, lockKey, expiresAt, ownerID); err == nil {
+						return nil
+					}
+				}
 			}
 		}
 
-	retry:
 		if time.Since(start) >= timeout {
 			return queen.ErrLockTimeout
 		}
@@ -58,4 +54,11 @@ func AcquireTableLock(ctx context.Context, db *sql.DB, config TableLockConfig, l
 			return ctx.Err()
 		}
 	}
+}
+
+func cleanupArgs(config TableLockConfig, lockKey string, expiresAt time.Time) []any {
+	if config.CleanupArgs != nil {
+		return config.CleanupArgs(lockKey, expiresAt)
+	}
+	return []any{lockKey, expiresAt}
 }

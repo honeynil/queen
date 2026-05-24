@@ -5,7 +5,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/honeynil/queen"
+	"github.com/yaop-labs/queen"
 	"gopkg.in/yaml.v3"
 )
 

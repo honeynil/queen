@@ -7,22 +7,30 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/honeynil/queen"
+	"github.com/yaop-labs/queen"
 )
 
 // Config contains configuration for the base driver.
 type Config struct {
 	Placeholder     func(n int) string
 	QuoteIdentifier func(name string) string
-	ParseTime       func(src interface{}) (time.Time, error)
+	ParseTime       func(src any) (time.Time, error)
 }
 
-// Driver provides a base implementation of common queen.Driver methods.
-// Concrete drivers should embed this type and implement Init() and Lock()/Unlock().
+// Driver holds the shared database handle and migration-table helpers.
 type Driver struct {
 	DB        *sql.DB
 	TableName string
 	Config    Config
+}
+
+type execContext interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+// SQLDB exposes the underlying database handle for optional diagnostics.
+func (d *Driver) SQLDB() *sql.DB {
+	return d.DB
 }
 
 // Exec executes a function within a transaction with the specified isolation level.
@@ -124,9 +132,19 @@ func (d *Driver) GetApplied(ctx context.Context) ([]queen.Applied, error) {
 
 // Record marks a migration as applied in the database.
 func (d *Driver) Record(ctx context.Context, m *queen.Migration, meta *queen.MigrationMetadata) error {
+	return d.record(ctx, d.DB, m, meta)
+}
+
+// RecordTx marks a migration as applied using tx. Concrete drivers can expose
+// this through queen.TransactionalRecorder when their database supports it.
+func RecordTx(ctx context.Context, d *Driver, tx *sql.Tx, m *queen.Migration, meta *queen.MigrationMetadata) error {
+	return d.record(ctx, tx, m, meta)
+}
+
+func (d *Driver) record(ctx context.Context, execer execContext, m *queen.Migration, meta *queen.MigrationMetadata) error {
 	query := fmt.Sprintf(`
-		INSERT INTO %s (version, name, checksum, applied_by, duration_ms, hostname, environment, action, status, error_message)
-		VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+			INSERT INTO %s (version, name, checksum, applied_by, duration_ms, hostname, environment, action, status, error_message)
+			VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 	`,
 		d.Config.QuoteIdentifier(d.TableName),
 		d.Config.Placeholder(1),
@@ -168,7 +186,7 @@ func (d *Driver) Record(ctx context.Context, m *queen.Migration, meta *queen.Mig
 		}
 	}
 
-	_, err := d.DB.ExecContext(ctx, query,
+	_, err := execer.ExecContext(ctx, query,
 		m.Version, m.Name, m.Checksum(),
 		appliedBy, durationMS, hostname, environment,
 		action, status, errorMessage,
@@ -178,14 +196,24 @@ func (d *Driver) Record(ctx context.Context, m *queen.Migration, meta *queen.Mig
 
 // Remove removes a migration record from the database.
 func (d *Driver) Remove(ctx context.Context, version string) error {
+	return d.remove(ctx, d.DB, version)
+}
+
+// RemoveTx removes a migration record using tx. Concrete drivers can expose
+// this through queen.TransactionalRecorder when their database supports it.
+func RemoveTx(ctx context.Context, d *Driver, tx *sql.Tx, version string) error {
+	return d.remove(ctx, tx, version)
+}
+
+func (d *Driver) remove(ctx context.Context, execer execContext, version string) error {
 	query := fmt.Sprintf(`
-		DELETE FROM %s WHERE version = %s
-	`,
+			DELETE FROM %s WHERE version = %s
+		`,
 		d.Config.QuoteIdentifier(d.TableName),
 		d.Config.Placeholder(1),
 	)
 
-	_, err := d.DB.ExecContext(ctx, query, version)
+	_, err := execer.ExecContext(ctx, query, version)
 	return err
 }
 
@@ -205,11 +233,26 @@ func PlaceholderAtSign(n int) string {
 	return fmt.Sprintf("@p%d", n)
 }
 
-// ParseTimeISO8601 parses time from ISO8601 string format.
+// ParseTimeISO8601 parses common SQLite timestamp and ISO-8601 string formats.
 func ParseTimeISO8601(src any) (time.Time, error) {
+	if t, ok := src.(time.Time); ok {
+		return t, nil
+	}
+
 	str, ok := src.(string)
 	if !ok {
 		return time.Time{}, fmt.Errorf("expected string, got %T", src)
 	}
-	return time.Parse("2006-01-02 15:04:05", str)
+
+	formats := []string{
+		time.RFC3339Nano,
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05",
+	}
+	for _, format := range formats {
+		if t, err := time.Parse(format, str); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unsupported time format %q", str)
 }

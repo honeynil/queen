@@ -5,15 +5,18 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 
-	"github.com/honeynil/queen"
-	"github.com/honeynil/queen/drivers/base"
+	"github.com/yaop-labs/queen"
+	"github.com/yaop-labs/queen/drivers/base"
 )
 
 // Driver implements the queen.Driver interface for MS SQL Server.
 type Driver struct {
 	base.Driver
+	lockMu   sync.Mutex
 	lockName string
 	conn     *sql.Conn
 }
@@ -41,6 +44,7 @@ func NewWithTableName(db *sql.DB, tableName string) *Driver {
 
 // Init creates the migrations tracking table if it doesn't exist.
 func (d *Driver) Init(ctx context.Context) error {
+	tableNameLiteral := escapeStringLiteral(d.TableName)
 	query := fmt.Sprintf(`
 		IF OBJECT_ID(N'%s', N'U') IS NULL
 		BEGIN
@@ -58,7 +62,7 @@ func (d *Driver) Init(ctx context.Context) error {
 				error_message NVARCHAR(MAX)
 			)
 		END
-	`, d.TableName, d.Config.QuoteIdentifier(d.TableName))
+	`, tableNameLiteral, d.Config.QuoteIdentifier(d.TableName))
 
 	if _, err := d.DB.ExecContext(ctx, query); err != nil {
 		return err
@@ -69,19 +73,19 @@ func (d *Driver) Init(ctx context.Context) error {
 		query  string
 	}{
 		{"applied_by", fmt.Sprintf(`IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'%s') AND name = 'applied_by')
-			ALTER TABLE %s ADD applied_by NVARCHAR(255)`, d.TableName, d.Config.QuoteIdentifier(d.TableName))},
+			ALTER TABLE %s ADD applied_by NVARCHAR(255)`, tableNameLiteral, d.Config.QuoteIdentifier(d.TableName))},
 		{"duration_ms", fmt.Sprintf(`IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'%s') AND name = 'duration_ms')
-			ALTER TABLE %s ADD duration_ms BIGINT`, d.TableName, d.Config.QuoteIdentifier(d.TableName))},
+			ALTER TABLE %s ADD duration_ms BIGINT`, tableNameLiteral, d.Config.QuoteIdentifier(d.TableName))},
 		{"hostname", fmt.Sprintf(`IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'%s') AND name = 'hostname')
-			ALTER TABLE %s ADD hostname NVARCHAR(255)`, d.TableName, d.Config.QuoteIdentifier(d.TableName))},
+			ALTER TABLE %s ADD hostname NVARCHAR(255)`, tableNameLiteral, d.Config.QuoteIdentifier(d.TableName))},
 		{"environment", fmt.Sprintf(`IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'%s') AND name = 'environment')
-			ALTER TABLE %s ADD environment NVARCHAR(50)`, d.TableName, d.Config.QuoteIdentifier(d.TableName))},
+			ALTER TABLE %s ADD environment NVARCHAR(50)`, tableNameLiteral, d.Config.QuoteIdentifier(d.TableName))},
 		{"action", fmt.Sprintf(`IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'%s') AND name = 'action')
-			ALTER TABLE %s ADD action NVARCHAR(20) DEFAULT 'apply'`, d.TableName, d.Config.QuoteIdentifier(d.TableName))},
+			ALTER TABLE %s ADD action NVARCHAR(20) DEFAULT 'apply'`, tableNameLiteral, d.Config.QuoteIdentifier(d.TableName))},
 		{"status", fmt.Sprintf(`IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'%s') AND name = 'status')
-			ALTER TABLE %s ADD status NVARCHAR(20) DEFAULT 'success'`, d.TableName, d.Config.QuoteIdentifier(d.TableName))},
+			ALTER TABLE %s ADD status NVARCHAR(20) DEFAULT 'success'`, tableNameLiteral, d.Config.QuoteIdentifier(d.TableName))},
 		{"error_message", fmt.Sprintf(`IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'%s') AND name = 'error_message')
-			ALTER TABLE %s ADD error_message NVARCHAR(MAX)`, d.TableName, d.Config.QuoteIdentifier(d.TableName))},
+			ALTER TABLE %s ADD error_message NVARCHAR(MAX)`, tableNameLiteral, d.Config.QuoteIdentifier(d.TableName))},
 	}
 
 	for _, migration := range migrations {
@@ -91,8 +95,19 @@ func (d *Driver) Init(ctx context.Context) error {
 	return nil
 }
 
+func escapeStringLiteral(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
+}
+
 // Lock acquires an application lock to prevent concurrent migrations.
 func (d *Driver) Lock(ctx context.Context, timeout time.Duration) error {
+	d.lockMu.Lock()
+	defer d.lockMu.Unlock()
+
+	if d.conn != nil {
+		return fmt.Errorf("%w: lock already held for table '%s'", queen.ErrLockTimeout, d.TableName)
+	}
+
 	conn, err := d.DB.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get connection: %w", err)
@@ -141,10 +156,14 @@ func (d *Driver) Lock(ctx context.Context, timeout time.Duration) error {
 
 // Unlock releases the migration lock.
 func (d *Driver) Unlock(ctx context.Context) error {
+	d.lockMu.Lock()
+	defer d.lockMu.Unlock()
+
 	if d.conn == nil {
 		return nil
 	}
 
+	conn := d.conn
 	var result int
 	query := `
 		DECLARE @result INT;
@@ -154,13 +173,13 @@ func (d *Driver) Unlock(ctx context.Context) error {
 		SELECT @result;
 	`
 
-	err := d.conn.QueryRowContext(ctx, query, sql.Named("p1", d.lockName)).Scan(&result)
+	err := conn.QueryRowContext(ctx, query, sql.Named("p1", d.lockName)).Scan(&result)
 	if err != nil {
 		return fmt.Errorf("failed to release lock '%s' for table '%s': %w",
 			d.lockName, d.TableName, err)
 	}
 
-	_ = d.conn.Close()
+	_ = conn.Close()
 	d.conn = nil
 
 	return nil

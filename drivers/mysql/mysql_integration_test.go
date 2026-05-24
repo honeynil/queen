@@ -12,9 +12,9 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
-	"github.com/honeynil/queen"
-	"github.com/honeynil/queen/drivers/mysql"
-	helpers "github.com/honeynil/queen/tests/integration"
+	"github.com/yaop-labs/queen"
+	"github.com/yaop-labs/queen/drivers/mysql"
+	helpers "github.com/yaop-labs/queen/tests/integration"
 )
 
 func setupMySQL(t *testing.T) (*sql.DB, string, func()) {

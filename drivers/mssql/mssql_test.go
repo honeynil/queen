@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/honeynil/queen"
-	"github.com/honeynil/queen/drivers/base"
+	"github.com/yaop-labs/queen"
+	"github.com/yaop-labs/queen/drivers/base"
 )
 
 // TestQuoteIdentifier tests the identifier quoting function for MSSQL
@@ -221,6 +221,36 @@ func TestInit(t *testing.T) {
 			t.Errorf("unfulfilled expectations: %v", err)
 		}
 	})
+
+	t.Run("escapes single quotes in object id literals", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := NewWithTableName(db, "queen'migrations")
+		ctx := context.Background()
+
+		mock.ExpectExec(regexp.QuoteMeta("IF OBJECT_ID(N'queen''migrations', N'U') IS NULL")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		mock.ExpectExec(regexp.QuoteMeta("OBJECT_ID(N'queen''migrations') AND name = 'applied_by'")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		for i := 0; i < 6; i++ {
+			mock.ExpectExec(regexp.QuoteMeta("IF NOT EXISTS")).
+				WillReturnResult(sqlmock.NewResult(0, 0))
+		}
+
+		if err := driver.Init(ctx); err != nil {
+			t.Errorf("Init() with quoted table name failed: %v", err)
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
 }
 
 // TestLock tests the Lock function for acquiring exclusive locks.
@@ -360,6 +390,41 @@ func TestLock(t *testing.T) {
 
 		if driver.conn != nil {
 			_ = driver.conn.Close()
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+
+	t.Run("rejects nested lock on same driver without replacing connection", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		mock.ExpectQuery(regexp.QuoteMeta("DECLARE @result INT")).
+			WithArgs("queen_lock_queen_migrations", sqlmock.AnyArg()).
+			WillReturnRows(sqlmock.NewRows([]string{"result"}).AddRow(0))
+
+		if err := driver.Lock(ctx, 5*time.Second); err != nil {
+			t.Fatalf("first Lock() failed: %v", err)
+		}
+
+		if err := driver.Lock(ctx, 5*time.Second); !errors.Is(err, queen.ErrLockTimeout) {
+			t.Fatalf("second Lock() error = %v, want ErrLockTimeout", err)
+		}
+
+		mock.ExpectQuery(regexp.QuoteMeta("DECLARE @result INT")).
+			WithArgs("queen_lock_queen_migrations").
+			WillReturnRows(sqlmock.NewRows([]string{"result"}).AddRow(0))
+
+		if err := driver.Unlock(ctx); err != nil {
+			t.Fatalf("Unlock() after rejected nested lock failed: %v", err)
 		}
 
 		if err := mock.ExpectationsWereMet(); err != nil {

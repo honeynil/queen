@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"github.com/yaop-labs/queen"
 )
 
 func (app *App) validateCmd() *cobra.Command {
@@ -12,20 +13,14 @@ func (app *App) validateCmd() *cobra.Command {
 		Use:   "validate",
 		Short: "Validate migrations",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := context.Background()
+			return app.runWithQueen(cmd, func(ctx context.Context, q *queen.Queen) error {
+				if err := q.Validate(ctx); err != nil {
+					return fmt.Errorf("validation failed: %w", err)
+				}
 
-			q, err := app.setupQueen(ctx)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = q.Close() }()
-
-			if err := q.Validate(ctx); err != nil {
-				return fmt.Errorf("validation failed: %w", err)
-			}
-
-			fmt.Println("All migrations are valid")
-			return nil
+				fmt.Println("All migrations are valid")
+				return nil
+			})
 		},
 	}
 }

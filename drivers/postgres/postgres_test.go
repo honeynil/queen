@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/honeynil/queen"
-	"github.com/honeynil/queen/drivers/base"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/yaop-labs/queen"
+	"github.com/yaop-labs/queen/drivers/base"
 )
 
 func TestQuoteIdentifier(t *testing.T) {
@@ -146,7 +146,7 @@ func TestInit(t *testing.T) {
 		mock.ExpectExec(`CREATE TABLE IF NOT EXISTS "queen_migrations"`).
 			WillReturnResult(sqlmock.NewResult(0, 0))
 
-		for i := 0; i < 7; i++ {
+		for range 7 {
 			mock.ExpectExec(`ALTER TABLE "queen_migrations" ADD COLUMN`).
 				WillReturnResult(sqlmock.NewResult(0, 0))
 		}
@@ -198,7 +198,7 @@ func TestInit(t *testing.T) {
 		mock.ExpectExec(`CREATE TABLE IF NOT EXISTS "queen_migrations"`).
 			WillReturnResult(sqlmock.NewResult(0, 0))
 
-		for i := 0; i < 7; i++ {
+		for range 7 {
 			mock.ExpectExec(`ALTER TABLE "queen_migrations" ADD COLUMN`).
 				WillReturnError(errors.New("column already exists"))
 		}
@@ -238,7 +238,13 @@ func TestLock(t *testing.T) {
 			t.Error("lockConn should be set after successful lock")
 		}
 
-		_ = driver.lockConn.Close()
+		mock.ExpectExec("SELECT pg_advisory_unlock").
+			WithArgs(driver.lockID).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		if err := driver.Unlock(ctx); err != nil {
+			t.Fatalf("Unlock() failed: %v", err)
+		}
 
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("unfulfilled expectations: %v", err)
@@ -262,6 +268,48 @@ func TestLock(t *testing.T) {
 		err = driver.Lock(ctx, 100*time.Millisecond)
 		if !errors.Is(err, queen.ErrLockTimeout) {
 			t.Errorf("Lock() error = %v; want ErrLockTimeout", err)
+		}
+	})
+
+	t.Run("rejects nested lock on same driver", func(t *testing.T) {
+		db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		mock.ExpectExec("SELECT pg_advisory_lock").
+			WithArgs(driver.lockID).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		if err := driver.Lock(ctx, 5*time.Second); err != nil {
+			t.Fatalf("first Lock() failed: %v", err)
+		}
+
+		err = driver.Lock(ctx, 5*time.Second)
+		if err == nil {
+			t.Fatal("second Lock() on same driver succeeded; want error")
+		}
+		if !strings.Contains(err.Error(), "already holds advisory lock") {
+			t.Fatalf("second Lock() error = %v; want already-holds error", err)
+		}
+		if driver.lockConn == nil {
+			t.Fatal("first lock connection was cleared by failed nested Lock")
+		}
+
+		mock.ExpectExec("SELECT pg_advisory_unlock").
+			WithArgs(driver.lockID).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		if err := driver.Unlock(ctx); err != nil {
+			t.Fatalf("Unlock() failed: %v", err)
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
 		}
 	})
 }

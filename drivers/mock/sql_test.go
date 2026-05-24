@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/honeynil/queen"
+	"github.com/yaop-labs/queen"
 )
 
 // TestMockDriver_SQLMigrations tests that SQL migrations work with the mock driver.

@@ -12,8 +12,8 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
-	"github.com/honeynil/queen"
-	"github.com/honeynil/queen/drivers/sqlite"
+	"github.com/yaop-labs/queen"
+	"github.com/yaop-labs/queen/drivers/sqlite"
 )
 
 // Example demonstrates basic usage of the SQLite driver.

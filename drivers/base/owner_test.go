@@ -47,7 +47,7 @@ func TestGenerateOwnerID(t *testing.T) {
 
 	t.Run("generates many unique IDs", func(t *testing.T) {
 		ids := make(map[string]bool)
-		for i := 0; i < 100; i++ {
+		for range 100 {
 			id, err := GenerateOwnerID()
 			if err != nil {
 				t.Fatalf("GenerateOwnerID() failed: %v", err)

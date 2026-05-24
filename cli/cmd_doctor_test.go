@@ -2,10 +2,11 @@ package cli
 
 import (
 	"context"
+	"strings"
 	"testing"
 
-	"github.com/honeynil/queen"
-	"github.com/honeynil/queen/drivers/mock"
+	"github.com/yaop-labs/queen"
+	"github.com/yaop-labs/queen/drivers/mock"
 )
 
 func TestCollectDoctorResults(t *testing.T) {
@@ -75,4 +76,31 @@ func TestCollectDoctorResults(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestOutputDoctorTableUsesUserFacingStatuses(t *testing.T) {
+	results := []DoctorResult{
+		{Check: "Database Connection", Status: statusPass, Message: "connected"},
+		{Check: "Gap Detection", Status: statusWarning, Message: "gap found"},
+		{Check: "Checksum Validation", Status: statusFail, Message: "checksum mismatch"},
+	}
+
+	var err error
+	out := captureStdout(t, func() {
+		err = outputDoctorTable(results)
+	})
+	if err == nil {
+		t.Fatal("expected failed doctor output to return an error")
+	}
+	if !strings.Contains(out, "Summary: 1 passed, 1 warnings, 1 failed") {
+		t.Fatalf("output summary mismatch:\n%s", out)
+	}
+	if !strings.Contains(out, "WARNING: Some checks failed. Review the issues above.") {
+		t.Fatalf("output missing failed-check warning:\n%s", out)
+	}
+	for _, leaked := range []string{"statusPass", "statusWarning", "statusFail", "WARNING: WARNING"} {
+		if strings.Contains(out, leaked) {
+			t.Fatalf("output leaked %q:\n%s", leaked, out)
+		}
+	}
 }

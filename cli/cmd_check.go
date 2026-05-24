@@ -1,26 +1,25 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"os"
 
-	"github.com/honeynil/queen"
 	"github.com/spf13/cobra"
 )
 
 func (app *App) checkCmd() *cobra.Command {
 	var (
-		ci        bool
-		noPending bool
-		noGaps    bool
+		ci           bool
+		noPending    bool
+		noGaps       bool
+		rollbackTest bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "check",
 		Short: "Quick validation for CI/CD pipelines",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := context.Background()
+			ctx := commandContext(cmd)
 			q, err := app.setupQueen(ctx)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Configuration error: %v\n", err)
@@ -28,93 +27,17 @@ func (app *App) checkCmd() *cobra.Command {
 			}
 			defer func() { _ = q.Close() }()
 
-			exitCode := 0
-			passed := 0
-			failed := 0
+			summary := runPipelineChecks(ctx, q, checkOptions{
+				ci:           ci,
+				noPending:    noPending,
+				noGaps:       noGaps,
+				rollbackTest: rollbackTest,
+			})
 
-			fmt.Print("Validating migrations... ")
-			if err := q.Validate(ctx); err != nil {
-				fmt.Printf("FAIL\n  %v\n", err)
-				failed++
-				exitCode = 3
-			} else {
-				fmt.Println("OK")
-				passed++
+			outputCheckSummary(summary)
+			if summary.failed > 0 {
+				os.Exit(summary.exitCode)
 			}
-
-			fmt.Print("Checking for gaps... ")
-			gaps, err := q.DetectGaps(ctx)
-			if err != nil {
-				fmt.Printf("FAIL\n  %v\n", err)
-				failed++
-				if exitCode == 0 {
-					exitCode = 3
-				}
-			} else if len(gaps) > 0 {
-				fmt.Printf("WARNING (%d gaps found)\n", len(gaps))
-				if noGaps || ci {
-					failed++
-					if exitCode == 0 {
-						exitCode = 4
-					}
-				} else {
-					passed++
-				}
-			} else {
-				fmt.Println("OK")
-				passed++
-			}
-
-			if noPending || ci {
-				fmt.Print("Checking for pending migrations... ")
-				statuses, err := q.Status(ctx)
-				if err != nil {
-					fmt.Printf("FAIL\n  %v\n", err)
-					failed++
-					if exitCode == 0 {
-						exitCode = 3
-					}
-				} else {
-					pendingCount := 0
-					for _, s := range statuses {
-						if s.Status == queen.StatusPending {
-							pendingCount++
-						}
-					}
-					if pendingCount > 0 {
-						fmt.Printf("FAIL (%d pending)\n", pendingCount)
-						failed++
-						if exitCode == 0 {
-							exitCode = 5
-						}
-					} else {
-						fmt.Println("OK")
-						passed++
-					}
-				}
-			}
-
-			fmt.Print("Database connectivity... ")
-			_, err = q.Driver().GetApplied(ctx)
-			if err != nil {
-				fmt.Printf("FAIL\n  %v\n", err)
-				failed++
-				if exitCode == 0 {
-					exitCode = 3
-				}
-			} else {
-				fmt.Println("OK")
-				passed++
-			}
-
-			fmt.Println()
-			if failed > 0 {
-				fmt.Printf("Checks: %d passed, %d failed\n", passed, failed)
-				os.Exit(exitCode)
-			} else {
-				fmt.Printf("All checks passed (%d/%d)\n", passed, passed)
-			}
-
 			return nil
 		},
 	}
@@ -122,6 +45,18 @@ func (app *App) checkCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&ci, "ci", false, "CI mode (strict validation, fails on warnings)")
 	cmd.Flags().BoolVar(&noPending, "no-pending", false, "Fail if pending migrations exist")
 	cmd.Flags().BoolVar(&noGaps, "no-gaps", false, "Fail if gaps are detected")
+	cmd.Flags().BoolVar(&rollbackTest, "rollback-test", false, "Run an up/reset/up rollback cycle against a clean test database")
 
 	return cmd
+}
+
+func outputCheckSummary(summary checkSummary) {
+	fmt.Println()
+	if summary.failed > 0 {
+		fmt.Printf("Checks: %d passed, %d failed\n", summary.passed, summary.failed)
+		return
+	}
+
+	total := summary.passed + summary.failed
+	fmt.Printf("All checks passed (%d/%d)\n", summary.passed, total)
 }

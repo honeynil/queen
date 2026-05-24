@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/honeynil/queen"
+	"github.com/yaop-labs/queen"
 )
 
 func TestPlaceholderDollar(t *testing.T) {
@@ -95,13 +95,31 @@ func TestQuoteBackticks(t *testing.T) {
 func TestParseTimeISO8601(t *testing.T) {
 	tests := []struct {
 		name     string
-		input    interface{}
+		input    any
 		expected time.Time
 		wantErr  bool
 	}{
 		{
 			name:     "valid timestamp",
 			input:    "2024-01-28 12:34:56",
+			expected: time.Date(2024, 1, 28, 12, 34, 56, 0, time.UTC),
+			wantErr:  false,
+		},
+		{
+			name:     "valid RFC3339 timestamp",
+			input:    "2024-01-28T12:34:56Z",
+			expected: time.Date(2024, 1, 28, 12, 34, 56, 0, time.UTC),
+			wantErr:  false,
+		},
+		{
+			name:     "valid ISO timestamp without timezone",
+			input:    "2024-01-28T12:34:56",
+			expected: time.Date(2024, 1, 28, 12, 34, 56, 0, time.UTC),
+			wantErr:  false,
+		},
+		{
+			name:     "time value",
+			input:    time.Date(2024, 1, 28, 12, 34, 56, 0, time.UTC),
 			expected: time.Date(2024, 1, 28, 12, 34, 56, 0, time.UTC),
 			wantErr:  false,
 		},
@@ -685,6 +703,50 @@ func TestAcquireTableLock(t *testing.T) {
 
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM locks")).
 			WithArgs("test_lock", sqlmock.AnyArg()).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM locks")).
+			WithArgs("test_lock").
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+
+		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO locks")).
+			WithArgs("test_lock", sqlmock.AnyArg(), "owner123").
+			WillReturnResult(sqlmock.NewResult(1, 1))
+
+		ctx := context.Background()
+		err = AcquireTableLock(ctx, db, config, "test_lock", "owner123", 5*time.Second)
+		if err != nil {
+			t.Errorf("AcquireTableLock() failed: %v", err)
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+
+	t.Run("supports cleanup queries with driver-specific argument lists", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		config := TableLockConfig{
+			CleanupQuery: "DELETE FROM locks WHERE lock_key = ? AND expires_at < now()",
+			CleanupArgs: func(lockKey string, _ time.Time) []any {
+				return []any{lockKey}
+			},
+			CheckQuery:  "SELECT COUNT(*) FROM locks WHERE lock_key = ?",
+			InsertQuery: "INSERT INTO locks (lock_key, expires_at, owner_id) VALUES (?, ?, ?)",
+			ScanFunc: func(row *sql.Row) (bool, error) {
+				var count int
+				err := row.Scan(&count)
+				return count > 0, err
+			},
+		}
+
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM locks")).
+			WithArgs("test_lock").
 			WillReturnResult(sqlmock.NewResult(0, 0))
 
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM locks")).

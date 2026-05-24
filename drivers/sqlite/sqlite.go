@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/honeynil/queen"
-	"github.com/honeynil/queen/drivers/base"
+	"github.com/yaop-labs/queen"
+	"github.com/yaop-labs/queen/drivers/base"
 )
 
 // Driver implements the queen.Driver interface for SQLite.
@@ -76,7 +76,8 @@ func (d *Driver) Init(ctx context.Context) error {
 	return nil
 }
 
-// Lock acquires an exclusive database lock to prevent concurrent migrations.
+// Lock uses SQLite's busy timeout and immediate transaction path.
+// It is intended for local SQLite use, not distributed coordination.
 func (d *Driver) Lock(ctx context.Context, timeout time.Duration) error {
 	_, err := d.DB.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout = %d", timeout.Milliseconds()))
 	if err != nil {

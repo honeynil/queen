@@ -3,12 +3,15 @@ package tui
 
 import (
 	"context"
-	"fmt"
 
+	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/spinner"
-	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/honeynil/queen"
+	"github.com/yaop-labs/queen"
+	"github.com/yaop-labs/queen/tap"
 )
 
 type ViewMode int
@@ -17,6 +20,15 @@ const (
 	ViewMigrations ViewMode = iota
 	ViewGaps
 	ViewHelp
+)
+
+// Focus represents which panel currently captures j/k input.
+type Focus int
+
+const (
+	FocusList Focus = iota
+	FocusDetail
+	FocusTap
 )
 
 type Model struct {
@@ -36,7 +48,39 @@ type Model struct {
 
 	spinner       spinner.Model
 	spinnerActive bool
-	scrollOffset  int
+	filter        string
+	filterEditing bool
+
+	tapSink        *tap.ChannelSink
+	tapEvents      []tap.Event
+	tapCursor      int
+	tapFollow      bool
+	showTap        bool
+	operationLabel string
+	explainResult  *tap.ExplainResult
+	explainError   string
+	explainQuery   string
+	explainMode    tap.ExplainMode
+	explainEvent   tap.Event
+	explainPinned  bool
+
+	// planCache memoizes Explain() lookups so the detail panel can render the
+	// migration's SQL with syntax highlighting without re-querying on each draw.
+	planCache map[string]*queen.MigrationPlan
+
+	// New bubbles widgets driving the layout.
+	migrationsTable table.Model
+	gapsTable       table.Model
+	detailVP        viewport.Model
+	tapVP           viewport.Model
+	filterInput     textinput.Model
+	helpView        help.Model
+	keys            keyMap
+	focus           Focus
+
+	// panelsReady tracks whether bubbles widgets have been initialised so
+	// callers that construct Model literally (in tests) still get safe defaults.
+	panelsReady bool
 }
 
 type MessageType int
@@ -51,9 +95,22 @@ const (
 func NewModel(q *queen.Queen, ctx context.Context) *Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
-	sp.Style = lipgloss.NewStyle().Foreground(primaryColor)
+	sp.Style = lipgloss.NewStyle().Foreground(colorPrimary)
 
-	return &Model{
+	ti := textinput.New()
+	ti.Prompt = ""
+	ti.Placeholder = "type to filter..."
+	ti.CharLimit = 64
+
+	h := help.New()
+	h.ShowAll = false
+	h.Styles.ShortKey = FooterKeyStyle
+	h.Styles.ShortDesc = FooterDescStyle
+	h.Styles.ShortSeparator = FooterDescStyle
+	h.Styles.FullKey = FooterKeyStyle
+	h.Styles.FullDesc = FooterDescStyle
+
+	m := &Model{
 		queen:         q,
 		ctx:           ctx,
 		cursor:        0,
@@ -61,428 +118,60 @@ func NewModel(q *queen.Queen, ctx context.Context) *Model {
 		loading:       true,
 		spinner:       sp,
 		spinnerActive: true,
+		planCache:     make(map[string]*queen.MigrationPlan),
+		filterInput:   ti,
+		helpView:      h,
+		keys:          newKeyMap(),
+		focus:         FocusList,
 	}
+	m.initPanels()
+	return m
 }
 
-func (m *Model) Init() tea.Cmd {
-	return tea.Batch(
-		m.loadMigrations(),
-		m.loadGaps(),
-		m.spinner.Tick,
-	)
+// ensurePanels lazily initialises bubbles widgets so model literals in tests
+// don't crash before they call View().
+func (m *Model) ensurePanels() {
+	if m.panelsReady {
+		return
+	}
+	if m.keys.Quit.Keys() == nil {
+		m.keys = newKeyMap()
+	}
+	if m.filterInput.Cursor.Style.GetForeground() == nil {
+		m.filterInput = textinput.New()
+		m.filterInput.Prompt = ""
+		m.filterInput.Placeholder = "type to filter..."
+		m.filterInput.CharLimit = 64
+	}
+	if m.planCache == nil {
+		m.planCache = make(map[string]*queen.MigrationPlan)
+	}
+	m.helpView = help.New()
+	m.helpView.ShowAll = false
+	m.helpView.Styles.ShortKey = FooterKeyStyle
+	m.helpView.Styles.ShortDesc = FooterDescStyle
+	m.helpView.Styles.ShortSeparator = FooterDescStyle
+	m.initPanels()
 }
 
-func (m *Model) loadMigrations() tea.Cmd {
-	return func() tea.Msg {
-		statuses, err := m.queen.Status(m.ctx)
-		if err != nil {
-			return errMsg{err}
-		}
-		return migrationsLoadedMsg{statuses}
+// migrationPlan returns the cached MigrationPlan for the given version, lazily
+// loading it via Queen.Explain on first request. Returns nil if Queen is unset
+// or Explain fails (callers fall back to metadata-only rendering).
+func (m *Model) migrationPlan(version string) *queen.MigrationPlan {
+	if m == nil || m.queen == nil || version == "" {
+		return nil
 	}
-}
-
-func (m *Model) loadGaps() tea.Cmd {
-	return func() tea.Msg {
-		gaps, err := m.queen.DetectGaps(m.ctx)
-		if err != nil {
-			return errMsg{err}
-		}
-		return gapsLoadedMsg{gaps}
+	if m.planCache == nil {
+		m.planCache = make(map[string]*queen.MigrationPlan)
 	}
-}
-
-type migrationsLoadedMsg struct {
-	migrations []queen.MigrationStatus
-}
-
-type gapsLoadedMsg struct {
-	gaps []queen.Gap
-}
-
-type errMsg struct {
-	err error
-}
-
-type operationCompleteMsg struct {
-	message     string
-	messageType MessageType
-}
-
-// Update handles messages and updates the model.
-func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		return m, nil
-
-	case tea.KeyMsg:
-		return m.handleKeyPress(msg)
-
-	case spinner.TickMsg:
-		if m.spinnerActive {
-			var cmd tea.Cmd
-			m.spinner, cmd = m.spinner.Update(msg)
-			return m, cmd
-		}
-		return m, nil
-
-	case migrationsLoadedMsg:
-		m.migrations = msg.migrations
-		m.loading = false
-		m.spinnerActive = false
-		return m, nil
-
-	case gapsLoadedMsg:
-		m.gaps = msg.gaps
-		return m, nil
-
-	case errMsg:
-		m.err = msg.err
-		m.message = fmt.Sprintf("Error: %v", msg.err)
-		m.messageType = MessageError
-		m.loading = false
-		m.spinnerActive = false
-		return m, nil
-
-	case operationCompleteMsg:
-		m.message = msg.message
-		m.messageType = msg.messageType
-		m.loading = false
-		m.spinnerActive = false
-		// Reload data after operation
-		return m, tea.Batch(m.loadMigrations(), m.loadGaps())
+	if plan, ok := m.planCache[version]; ok {
+		return plan
 	}
-
-	return m, nil
-}
-
-// contentHeight returns how many list items fit in the visible area.
-func (m *Model) contentHeight() int {
-	// header(1) + tabbar(1) + separator(1) + stats+progress(2) + separator(1) + message(2) + footer(1) + padding(2)
-	overhead := 11
-	if m.message != "" {
-		overhead += 2
+	plan, err := m.queen.Explain(m.ctx, version)
+	if err != nil {
+		m.planCache[version] = nil
+		return nil
 	}
-	available := m.height - overhead
-	if available < 3 {
-		available = 3
-	}
-	return available
-}
-
-// adjustScroll keeps the cursor within the visible window.
-func (m *Model) adjustScroll() {
-	visible := m.contentHeight()
-	if m.cursor < m.scrollOffset {
-		m.scrollOffset = m.cursor
-	}
-	if m.cursor >= m.scrollOffset+visible {
-		m.scrollOffset = m.cursor - visible + 1
-	}
-	if m.scrollOffset < 0 {
-		m.scrollOffset = 0
-	}
-}
-
-// handleKeyPress handles keyboard input.
-func (m *Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.loading {
-		return m, nil
-	}
-
-	switch msg.String() {
-	case "ctrl+c", "q":
-		m.quitting = true
-		return m, tea.Quit
-
-	case "up", "k":
-		if m.cursor > 0 {
-			m.cursor--
-			m.adjustScroll()
-		}
-
-	case "down", "j":
-		maxCursor := 0
-		switch m.viewMode {
-		case ViewMigrations:
-			maxCursor = len(m.migrations) - 1
-		case ViewGaps:
-			maxCursor = len(m.gaps) - 1
-		}
-		if m.cursor < maxCursor {
-			m.cursor++
-			m.adjustScroll()
-		}
-
-	case "g":
-		m.cursor = 0
-		m.scrollOffset = 0
-
-	case "G":
-		switch m.viewMode {
-		case ViewMigrations:
-			if len(m.migrations) > 0 {
-				m.cursor = len(m.migrations) - 1
-			}
-		case ViewGaps:
-			if len(m.gaps) > 0 {
-				m.cursor = len(m.gaps) - 1
-			}
-		}
-		m.adjustScroll()
-
-	case "1":
-		m.viewMode = ViewMigrations
-		m.cursor = 0
-		m.scrollOffset = 0
-		m.message = ""
-
-	case "2":
-		m.viewMode = ViewGaps
-		m.cursor = 0
-		m.scrollOffset = 0
-		m.message = ""
-
-	case "3", "?":
-		m.viewMode = ViewHelp
-		m.cursor = 0
-		m.scrollOffset = 0
-		m.message = ""
-
-	case "r":
-		m.loading = true
-		m.spinnerActive = true
-		m.message = ""
-		return m, tea.Batch(m.loadMigrations(), m.loadGaps(), m.spinner.Tick)
-
-	case "enter":
-		return m.handleAction()
-
-	case "u":
-		if m.viewMode == ViewMigrations {
-			return m.applyMigration()
-		}
-
-	case "d":
-		if m.viewMode == ViewMigrations {
-			return m.rollbackMigration()
-		}
-
-	case "f":
-		if m.viewMode == ViewGaps {
-			return m.fillGap()
-		}
-
-	case "i":
-		if m.viewMode == ViewGaps {
-			return m.ignoreGap()
-		}
-	}
-
-	return m, nil
-}
-
-// handleAction handles enter key press based on context.
-func (m *Model) handleAction() (tea.Model, tea.Cmd) {
-	switch m.viewMode {
-	case ViewMigrations:
-		if len(m.migrations) == 0 || m.cursor >= len(m.migrations) {
-			return m, nil
-		}
-		migration := m.migrations[m.cursor]
-		if migration.Status == queen.StatusPending {
-			return m.applyMigration()
-		} else {
-			return m.rollbackMigration()
-		}
-
-	case ViewGaps:
-		return m.fillGap()
-	}
-
-	return m, nil
-}
-
-// applyMigration applies the selected migration.
-func (m *Model) applyMigration() (tea.Model, tea.Cmd) {
-	if len(m.migrations) == 0 || m.cursor >= len(m.migrations) {
-		return m, nil
-	}
-
-	migration := m.migrations[m.cursor]
-	if migration.Status != queen.StatusPending {
-		m.message = "Migration already applied"
-		m.messageType = MessageWarning
-		return m, nil
-	}
-
-	m.loading = true
-	m.spinnerActive = true
-	return m, tea.Batch(func() tea.Msg {
-		// Count steps to this migration
-		steps := 0
-		for i := 0; i <= m.cursor; i++ {
-			if m.migrations[i].Status == queen.StatusPending {
-				steps++
-			}
-		}
-
-		if err := m.queen.UpSteps(m.ctx, steps); err != nil {
-			return operationCompleteMsg{
-				message:     fmt.Sprintf("Failed to apply migration: %v", err),
-				messageType: MessageError,
-			}
-		}
-
-		return operationCompleteMsg{
-			message:     fmt.Sprintf("Applied migration %s", migration.Version),
-			messageType: MessageSuccess,
-		}
-	}, m.spinner.Tick)
-}
-
-// rollbackMigration rolls back the selected migration.
-func (m *Model) rollbackMigration() (tea.Model, tea.Cmd) {
-	if len(m.migrations) == 0 || m.cursor >= len(m.migrations) {
-		return m, nil
-	}
-
-	migration := m.migrations[m.cursor]
-	if migration.Status != queen.StatusApplied {
-		m.message = "Migration not applied yet"
-		m.messageType = MessageWarning
-		return m, nil
-	}
-
-	m.loading = true
-	m.spinnerActive = true
-	return m, tea.Batch(func() tea.Msg {
-		// Count steps from this migration
-		steps := 0
-		for i := m.cursor; i < len(m.migrations); i++ {
-			if m.migrations[i].Status == queen.StatusApplied {
-				steps++
-			}
-		}
-
-		if err := m.queen.Down(m.ctx, steps); err != nil {
-			return operationCompleteMsg{
-				message:     fmt.Sprintf("Failed to rollback migration: %v", err),
-				messageType: MessageError,
-			}
-		}
-
-		return operationCompleteMsg{
-			message:     fmt.Sprintf("Rolled back %d migration(s)", steps),
-			messageType: MessageSuccess,
-		}
-	}, m.spinner.Tick)
-}
-
-// fillGap fills the selected gap.
-func (m *Model) fillGap() (tea.Model, tea.Cmd) {
-	if len(m.gaps) == 0 || m.cursor >= len(m.gaps) {
-		return m, nil
-	}
-
-	gap := m.gaps[m.cursor]
-	m.loading = true
-	m.spinnerActive = true
-
-	return m, tea.Batch(func() tea.Msg {
-		// Get migration statuses
-		statuses, err := m.queen.Status(m.ctx)
-		if err != nil {
-			return operationCompleteMsg{
-				message:     fmt.Sprintf("Failed to get status: %v", err),
-				messageType: MessageError,
-			}
-		}
-
-		targetIndex := -1
-		for i, s := range statuses {
-			if s.Version == gap.Version {
-				targetIndex = i
-				break
-			}
-		}
-
-		if targetIndex == -1 {
-			return operationCompleteMsg{
-				message:     fmt.Sprintf("Migration %s not found", gap.Version),
-				messageType: MessageError,
-			}
-		}
-
-		// Count steps to apply
-		stepsToApply := 0
-		for i := 0; i <= targetIndex; i++ {
-			if statuses[i].Status == queen.StatusPending {
-				stepsToApply++
-			}
-		}
-
-		if err := m.queen.UpSteps(m.ctx, stepsToApply); err != nil {
-			return operationCompleteMsg{
-				message:     fmt.Sprintf("Failed to fill gap: %v", err),
-				messageType: MessageError,
-			}
-		}
-
-		return operationCompleteMsg{
-			message:     fmt.Sprintf("Filled gap: %s", gap.Version),
-			messageType: MessageSuccess,
-		}
-	}, m.spinner.Tick)
-}
-
-// ignoreGap ignores the selected gap.
-func (m *Model) ignoreGap() (tea.Model, tea.Cmd) {
-	if len(m.gaps) == 0 || m.cursor >= len(m.gaps) {
-		return m, nil
-	}
-
-	gap := m.gaps[m.cursor]
-	m.loading = true
-	m.spinnerActive = true
-
-	return m, tea.Batch(func() tea.Msg {
-		qi, err := queen.LoadQueenIgnore()
-		if err != nil {
-			// Create new one if doesn't exist
-			qi = &queen.QueenIgnore{}
-		}
-
-		if err := qi.AddIgnore(gap.Version, gap.Description, "tui"); err != nil {
-			return operationCompleteMsg{
-				message:     fmt.Sprintf("Failed to ignore gap: %v", err),
-				messageType: MessageError,
-			}
-		}
-
-		return operationCompleteMsg{
-			message:     fmt.Sprintf("Ignored gap: %s", gap.Version),
-			messageType: MessageSuccess,
-		}
-	}, m.spinner.Tick)
-}
-
-// View renders the UI.
-func (m *Model) View() string {
-	if m.quitting {
-		return ""
-	}
-
-	switch m.viewMode {
-	case ViewMigrations:
-		return m.renderMigrationsView()
-	case ViewGaps:
-		return m.renderGapsView()
-	case ViewHelp:
-		return m.renderHelpView()
-	}
-
-	return ""
+	m.planCache[version] = plan
+	return plan
 }

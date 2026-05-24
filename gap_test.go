@@ -3,6 +3,7 @@ package queen
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 )
@@ -164,13 +165,38 @@ func TestDetectNumberingGaps(t *testing.T) {
 			t.Errorf("expected no numbering gaps, got %d", len(gaps))
 		}
 	})
+
+	t.Run("handles all-zero starting version", func(t *testing.T) {
+		t.Parallel()
+
+		q := &Queen{
+			migrations: []*Migration{
+				{Version: "000", Name: "bootstrap"},
+				{Version: "002", Name: "add_email"},
+			},
+			applied: make(map[string]*Applied),
+		}
+
+		gaps := q.detectNumberingGaps()
+		if len(gaps) != 1 {
+			t.Fatalf("expected 1 numbering gap, got %d", len(gaps))
+		}
+		if gaps[0].Version != "001" {
+			t.Fatalf("gap version = %q, want 001", gaps[0].Version)
+		}
+	})
 }
 
 func TestFilterIgnoredGaps(t *testing.T) {
-	t.Parallel()
-
 	t.Run("returns all gaps when no queenignore file", func(t *testing.T) {
-		t.Parallel()
+		oldWd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("get working directory: %v", err)
+		}
+		if err := os.Chdir(t.TempDir()); err != nil {
+			t.Fatalf("change working directory: %v", err)
+		}
+		defer func() { _ = os.Chdir(oldWd) }()
 
 		q := &Queen{}
 

@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/honeynil/queen"
-	"github.com/honeynil/queen/drivers/base"
+	"github.com/yaop-labs/queen"
+	"github.com/yaop-labs/queen/drivers/base"
 )
 
-// Driver implements the queen.Driver interface for ClickHouse
+// Driver implements the queen.Driver interface for ClickHouse.
 type Driver struct {
 	base.Driver
 	lockTableName string
@@ -102,13 +102,16 @@ func (d *Driver) Init(ctx context.Context) error {
 	return err
 }
 
-// Lock acquires a distributed lock to prevent concurrent migrations.
+// Lock uses a ClickHouse table as a best-effort migration guard.
 func (d *Driver) Lock(ctx context.Context, timeout time.Duration) error {
 	cfg := base.TableLockConfig{
 		CleanupQuery: fmt.Sprintf(
 			"ALTER TABLE %s DELETE WHERE lock_key = ? AND expires_at < now64(3)",
 			d.Config.QuoteIdentifier(d.lockTableName),
 		),
+		CleanupArgs: func(lockKey string, _ time.Time) []any {
+			return []any{lockKey}
+		},
 		CheckQuery: fmt.Sprintf(
 			"SELECT count(*) FROM %s FINAL WHERE lock_key = ? AND expires_at >= now64(3)",
 			d.Config.QuoteIdentifier(d.lockTableName),

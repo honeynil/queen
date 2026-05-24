@@ -32,7 +32,3 @@ Thumbs.db
 # Temp files
 *.tmp
 *.log
-
-docs/
-examples/
-graphify-out/

@@ -2,7 +2,10 @@ package queen
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
+	"reflect"
 	"testing"
 )
 
@@ -53,6 +56,51 @@ func TestReset(t *testing.T) {
 	})
 }
 
+func TestDownNonPositiveRollsBackOneMigration(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	q := New(&testDriver{})
+
+	rolledBack := ""
+	for i := 1; i <= 3; i++ {
+		version := fmt.Sprintf("%03d", i)
+		q.MustAdd(M{
+			Version: version,
+			Name:    fmt.Sprintf("migration_%03d", i),
+			UpFunc:  func(context.Context, *sql.Tx) error { return nil },
+			DownFunc: func(context.Context, *sql.Tx) error {
+				rolledBack = version
+				return nil
+			},
+		})
+	}
+
+	if err := q.Up(ctx); err != nil {
+		t.Fatalf("Up() failed: %v", err)
+	}
+	if err := q.Down(ctx, 0); err != nil {
+		t.Fatalf("Down(ctx, 0) failed: %v", err)
+	}
+	if rolledBack != "003" {
+		t.Fatalf("Down(ctx, 0) rolled back %q, want latest migration 003", rolledBack)
+	}
+
+	statuses, err := q.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status() failed: %v", err)
+	}
+	applied := 0
+	for _, s := range statuses {
+		if s.Status == StatusApplied {
+			applied++
+		}
+	}
+	if applied != 2 {
+		t.Fatalf("applied migrations after Down(ctx, 0) = %d, want 2", applied)
+	}
+}
+
 func TestStatus(t *testing.T) {
 	t.Parallel()
 
@@ -86,6 +134,32 @@ func TestStatus(t *testing.T) {
 
 		if len(statuses) != 1 {
 			t.Errorf("expected 1 status, got %d", len(statuses))
+		}
+	})
+
+	t.Run("returns statuses in natural version order", func(t *testing.T) {
+		t.Parallel()
+
+		driver := &testDriver{}
+		q := New(driver)
+
+		for _, m := range []M{
+			{Version: "010", Name: "ten", UpSQL: "SELECT 10"},
+			{Version: "002", Name: "two", UpSQL: "SELECT 2"},
+			{Version: "001", Name: "one", UpSQL: "SELECT 1"},
+		} {
+			q.MustAdd(m)
+		}
+
+		statuses, err := q.Status(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		got := []string{statuses[0].Version, statuses[1].Version, statuses[2].Version}
+		want := []string{"001", "002", "010"}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("status order = %v, want %v", got, want)
 		}
 	})
 }
@@ -123,6 +197,47 @@ func TestValidate(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
+}
+
+func TestMigrationCommandsRejectChecksumMismatch(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		run  func(context.Context, *Queen) error
+	}{
+		{name: "up", run: func(ctx context.Context, q *Queen) error { return q.Up(ctx) }},
+		{name: "down", run: func(ctx context.Context, q *Queen) error { return q.Down(ctx, 1) }},
+		{name: "reset", run: func(ctx context.Context, q *Queen) error { return q.Reset(ctx) }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			driver := &testDriver{
+				applied: map[string]Applied{
+					"001": {
+						Version:  "001",
+						Name:     "test",
+						Checksum: "old-checksum",
+					},
+				},
+			}
+			q := New(driver)
+			q.MustAdd(M{
+				Version: "001",
+				Name:    "test",
+				UpSQL:   "SELECT 1",
+				DownSQL: "SELECT 0",
+			})
+
+			err := tt.run(context.Background(), q)
+			if !errors.Is(err, ErrChecksumMismatch) {
+				t.Fatalf("%s error = %v, want ErrChecksumMismatch", tt.name, err)
+			}
+		})
+	}
 }
 
 func TestDryRun(t *testing.T) {

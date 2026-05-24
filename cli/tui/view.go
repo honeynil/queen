@@ -1,4 +1,3 @@
-// Package tui provides a terminal UI for Queen migrations.
 package tui
 
 import (
@@ -6,497 +5,411 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/honeynil/queen"
+	"github.com/yaop-labs/queen"
 )
 
-// renderHeader renders the top header bar with app title and status.
-func (m *Model) renderHeader(width int) string {
-	title := AppTitleStyle.Render("♛ Queen")
-	subtitle := AppSubtitleStyle.Render(" Migration Manager")
-	left := title + subtitle
+// View renders the main cockpit. The layout is intentionally component based:
+// list, detail, and tap/explain each own their screen area.
+func (m *Model) View() string {
+	if m.quitting {
+		return ""
+	}
+	m.ensurePanels()
+	m.resizePanels()
+	m.refreshRows()
+	m.refreshDetail()
+	m.refreshTap()
 
-	right := ""
-	if m.loading {
-		right = m.spinner.View() + " Loading..."
+	w, h := m.effectiveSize()
+	sections := []string{m.renderTopBar(w), m.renderTabs(w)}
+	if m.filterVisible() {
+		sections = append(sections, m.renderFilterBar(w))
+	}
+	if m.message != "" {
+		sections = append(sections, m.renderMessageBar(w))
+	}
+	sections = append(sections, m.renderBody(w, h-lipgloss.Height(strings.Join(sections, "\n"))-1))
+	sections = append(sections, m.renderFooter(w))
+	return strings.Join(sections, "\n")
+}
+
+func (m *Model) renderTopBar(width int) string {
+	if width < 1 {
+		width = 1
+	}
+	if width >= 96 {
+		return m.renderASCIITopBar(width)
 	}
 
-	gap := width - lipgloss.Width(left) - lipgloss.Width(right) - 4
+	state, stateStyle := m.releaseState()
+	lines := []string{
+		placeApartPlain(AppTitleStyle.Render("QUEEN"), stateStyle.Render(strings.ToUpper(state)), width),
+		m.renderMetricLine(width),
+		m.renderContextLine(width),
+		m.renderTapStateLine(width),
+	}
+	return renderBarLines(lines, width)
+}
+
+func topBarHeight(width int) int {
+	if width >= 96 {
+		return len(queenBannerLines)
+	}
+	return 4
+}
+
+func (m *Model) renderASCIITopBar(width int) string {
+	logo := strings.Split(RenderBanner(), "\n")
+	lines := append([]string(nil), logo...)
+	return renderBarLines(lines, width)
+}
+
+func (m *Model) releaseState() (string, lipgloss.Style) {
+	_, pending, modified, destructive := m.migrationCounts()
+	gapErrors := 0
+	for _, g := range m.gaps {
+		if strings.EqualFold(g.Severity, "error") {
+			gapErrors++
+		}
+	}
+	switch {
+	case m.err != nil:
+		return "error", ErrorStyle
+	case modified > 0:
+		return "checksum drift", ErrorStyle
+	case gapErrors > 0:
+		return "blocked gaps", ErrorStyle
+	case destructive > 0 && pending > 0:
+		return "review destructive", ErrorStyle
+	case pending > 0:
+		return "pending", StatusPillStyle
+	case len(m.gaps) > 0:
+		return "gaps", WarningMsgStyle
+	default:
+		return "up to date", AppliedStyle
+	}
+}
+
+func (m *Model) renderMetricLine(width int) string {
+	applied, pending, modified, destructive := m.migrationCounts()
+	parts := []string{
+		AppliedStyle.Render(fmt.Sprintf("applied %d", applied)),
+		PendingStyle.Render(fmt.Sprintf("pending %d", pending)),
+		DetailStyle.Render(fmt.Sprintf("gaps %d", len(m.gaps))),
+	}
+	if modified > 0 {
+		parts = append(parts, WarningMsgStyle.Render(fmt.Sprintf("modified %d", modified)))
+	}
+	if destructive > 0 {
+		parts = append(parts, ErrorStyle.Render(fmt.Sprintf("destructive %d", destructive)))
+	}
+	if m.loading {
+		parts = append(parts, StatusInfoStyle.Render(m.spinner.View()+" loading"))
+	}
+	return truncate(strings.Join(parts, DetailStyle.Render("  |  ")), width)
+}
+
+func (m *Model) renderContextLine(width int) string {
+	prefix := HelpHintStyle.Render("next ")
+	var context string
+	switch m.viewMode {
+	case ViewHelp:
+		context = "read shortcuts and workflow"
+	case ViewGaps:
+		if gap, ok := m.selectedGap(); ok {
+			context = fmt.Sprintf("fill or ignore gap %s · %s", gap.Version, gapTypeLabel(gap.Type))
+		} else {
+			context = "no gaps in current filter"
+		}
+	default:
+		if m.explainActive() {
+			context = "explain is isolated in the right panel · esc returns to tap"
+			break
+		}
+		if mig, _, ok := m.selectedMigration(); ok {
+			switch mig.Status {
+			case queen.StatusApplied:
+				if mig.HasRollback {
+					context = fmt.Sprintf("rollback from %s · enter", mig.Version)
+				} else {
+					context = fmt.Sprintf("%s is applied without rollback", mig.Version)
+				}
+			case queen.StatusModified:
+				context = fmt.Sprintf("inspect checksum drift in %s", mig.Version)
+			default:
+				action := NameStyle.Render("apply")
+				if mig.Destructive {
+					action = ErrorStyle.Render("review destructive apply")
+				}
+				return truncate(prefix+action+NameStyle.Render(fmt.Sprintf(" %s · enter", mig.Version)), width)
+			}
+		} else {
+			context = "no migrations in current filter"
+		}
+	}
+	return truncate(prefix+NameStyle.Render(context), width)
+}
+
+func (m *Model) renderTapStateLine(width int) string {
+	if len(m.tapEvents) == 0 && !m.showTap {
+		return truncate(DetailStyle.Render("tap idle · operations will open a live SQL trace"), width)
+	}
+	mode := "live"
+	modeStyle := AppliedStyle
+	if !m.tapFollow {
+		mode = "paused"
+		modeStyle = WarningMsgStyle
+	}
+	label := "tap"
+	if m.explainActive() {
+		label = "explain"
+		mode = "pinned"
+		modeStyle = StatusInfoStyle
+	}
+	operation := m.operationLabel
+	if operation == "" {
+		operation = "no active operation"
+	}
+	line := StatusInfoStyle.Render(label) + DetailStyle.Render(" | ") +
+		modeStyle.Render(mode) + DetailStyle.Render(fmt.Sprintf(" | events %d | %s", len(m.tapEvents), operation))
+	return truncate(line, width)
+}
+
+func (m *Model) renderTabs(width int) string {
+	tab := func(key, label string, active bool) string {
+		text := fmt.Sprintf(" %s %s ", key, label)
+		if active {
+			return ActiveTabStyle.Render(text)
+		}
+		return InactiveTabStyle.Render(text)
+	}
+	parts := []string{
+		tab("1", "Migrations", m.viewMode == ViewMigrations),
+		tab("2", "Gaps", m.viewMode == ViewGaps),
+		tab("3", "Help", m.viewMode == ViewHelp),
+	}
+	if m.showTap || len(m.tapEvents) > 0 {
+		label := "Tap"
+		if m.explainActive() {
+			label = "Explain"
+		}
+		parts = append(parts, StatusDarkPillStyle.Render(label))
+	}
+	return lipgloss.NewStyle().Width(width).Render(truncate(strings.Join(parts, " "), width))
+}
+
+func (m *Model) renderFilterBar(width int) string {
+	value := m.filter
+	if value == "" {
+		value = m.filterInput.Placeholder
+	}
+	if m.filterEditing {
+		value = m.filterInput.View()
+	}
+	line := HelpKeyStyle.Render("/") + FooterDescStyle.Render(" filter  ") + NameStyle.Render(value)
+	return lipgloss.NewStyle().Width(width).Background(colorPanelBg).Render(truncate(line, width))
+}
+
+func (m *Model) renderMessageBar(width int) string {
+	style := DetailStyle
+	switch m.messageType {
+	case MessageSuccess:
+		style = SuccessMsgStyle
+	case MessageWarning:
+		style = WarningMsgStyle
+	case MessageError:
+		style = ErrorMsgStyle
+	}
+	return lipgloss.NewStyle().Width(width).Render(style.Render(truncate(m.message, width)))
+}
+
+func (m *Model) renderBody(width, height int) string {
+	if height < 6 {
+		height = 6
+	}
+	if m.viewMode == ViewHelp {
+		return m.renderHelpBody(width, height)
+	}
+	if m.viewMode == ViewGaps {
+		return m.renderGapsBody(width, height)
+	}
+	if m.usingThreePane() {
+		leftW, rightW := m.panelSplitWidths(width)
+		detailH := height * 55 / 100
+		if m.usesSQLPreview(width) {
+			detailH = height * 46 / 100
+		}
+		detailH = clamp(detailH, 6, maxInt(6, height-5))
+		tapH := height - detailH
+		if tapH < 5 {
+			tapH = 5
+			detailH = height - tapH
+		}
+
+		list := m.renderListPanel(leftW, height)
+		if m.explainActive() {
+			explain := m.renderPanel("explain plan", m.tapVP.View(), rightW, height, m.focus == FocusTap || m.focus == FocusDetail)
+			return lipgloss.JoinHorizontal(lipgloss.Top, list, explain)
+		}
+		detail := m.renderPanel(m.detailPanelTitle(), m.detailVP.View(), rightW, detailH, m.focus == FocusDetail)
+		if m.usesSQLPreview(width) {
+			detailW := rightW * 44 / 100
+			if detailW < 24 {
+				detailW = 24
+			}
+			if detailW > rightW-24 {
+				detailW = rightW - 24
+			}
+			sqlW := rightW - detailW
+			detail = m.renderPanel(m.detailPanelTitle(), m.detailVP.View(), detailW, detailH, m.focus == FocusDetail)
+			sql := m.renderPanel(m.sqlPreviewPanelTitle(), m.renderMigrationSQLPreviewContent(maxInt(1, sqlW-2)), sqlW, detailH, false)
+			topRight := lipgloss.JoinHorizontal(lipgloss.Top, detail, sql)
+			tap := m.renderPanel("tap stream", m.tapVP.View(), rightW, tapH, m.focus == FocusTap)
+			right := lipgloss.JoinVertical(lipgloss.Left, topRight, tap)
+			return lipgloss.JoinHorizontal(lipgloss.Top, list, right)
+		}
+		tap := m.renderPanel("tap stream", m.tapVP.View(), rightW, tapH, m.focus == FocusTap)
+		right := lipgloss.JoinVertical(lipgloss.Left, detail, tap)
+		return lipgloss.JoinHorizontal(lipgloss.Top, list, right)
+	}
+	return m.renderListPanel(width, height)
+}
+
+func (m *Model) renderListPanel(width, height int) string {
+	title := "migrations"
+	content := m.renderMigrationListContent(maxInt(1, width-2), maxInt(1, height-3))
+	if m.viewMode == ViewGaps {
+		title = "gaps"
+		content = m.renderGapListContent(maxInt(1, width-2), maxInt(1, height-3))
+	}
+	return m.renderPanel(title, content, width, height, m.focus == FocusList)
+}
+
+func (m *Model) detailPanelTitle() string {
+	switch m.viewMode {
+	case ViewGaps:
+		return "gap details"
+	default:
+		return "migration details"
+	}
+}
+
+func (m *Model) renderPanel(title, content string, width, height int, active bool) string {
+	if width < 8 {
+		width = 8
+	}
+	if height < 3 {
+		height = 3
+	}
+	style := PanelStyle
+	if active {
+		style = PanelActiveStyle
+	}
+	innerW := maxInt(1, width-2)
+	innerH := maxInt(1, height-2)
+	header := PanelTitleStyle.Render(" " + title + " ")
+	lines := make([]string, 1, innerH)
+	lines[0] = truncate(header, innerW)
+	lines = append(lines, fitBlock(content, innerW, innerH-1)...)
+	return style.Width(innerW).Height(innerH).Render(strings.Join(lines, "\n"))
+}
+
+func (m *Model) renderFooter(width int) string {
+	helpLine := m.contextualHelpLine()
+	if helpLine == "" {
+		helpLine = m.helpView.View(m.keys)
+	}
+	if helpLine == "" {
+		helpLine = footerHelp("tab", "focus") + footerSep() +
+			footerHelp("j/k", "move") + footerSep() +
+			footerHelp("enter", "action") + footerSep() +
+			footerHelp("/", "filter") + footerSep() +
+			footerHelp("q", "quit")
+	}
+	return FooterStyle.Width(width).Render(truncate(helpLine, maxInt(1, width-4)))
+}
+
+func (m *Model) contextualHelpLine() string {
+	if m.explainActive() {
+		return footerHelp("j/k", "scroll explain") + footerSep() +
+			footerHelp("esc", "back to tap") + footerSep() +
+			footerHelp("tab", "focus") + footerSep() +
+			footerHelp("q", "quit")
+	}
+	if m.viewMode == ViewHelp {
+		return footerHelp("tab", "focus") + footerSep() +
+			footerHelp("j/k", "navigate") + footerSep() +
+			footerHelp("q", "back")
+	}
+	if m.viewMode == ViewGaps {
+		return footerHelp("tab", "focus") + footerSep() +
+			footerHelp("j/k", "navigate") + footerSep() +
+			footerHelp("r", "refresh") + footerSep() +
+			footerHelp("enter/f", "fill") + footerSep() +
+			footerHelp("i", "ignore") + footerSep() +
+			footerHelp("q", "back")
+	}
+	switch m.focus {
+	case FocusDetail:
+		return footerHelp("j/k", "scroll details") + footerSep() +
+			footerHelp("tab", "tap/list") + footerSep() +
+			footerHelp("enter", "apply/fill") + footerSep() +
+			footerHelp("q", "quit")
+	case FocusTap:
+		return footerHelp("j/k", "select SQL") + footerSep() +
+			footerHelp("x", "explain") + footerSep() +
+			footerHelp("X", "analyze") + footerSep() +
+			footerHelp("tab", "details/list") + footerSep() +
+			footerHelp("q", "quit")
+	default:
+		return footerHelp("tab", "focus") + footerSep() +
+			footerHelp("j/k", "navigate") + footerSep() +
+			footerHelp("enter", "apply/rollback") + footerSep() +
+			footerHelp("r", "refresh") + footerSep() +
+			footerHelp("/", "filter") + footerSep() +
+			footerHelp("q", "quit")
+	}
+}
+
+func footerHelp(key, desc string) string {
+	return FooterKeyStyle.Render(key) + FooterDescStyle.Render(" "+desc)
+}
+
+func footerSep() string {
+	return FooterDescStyle.Render("  |  ")
+}
+
+func fitBlock(s string, width, height int) []string {
+	if height <= 0 {
+		return nil
+	}
+	raw := strings.Split(s, "\n")
+	out := make([]string, 0, height)
+	for _, line := range raw {
+		if len(out) == height {
+			break
+		}
+		out = append(out, padRight(truncate(line, width), width))
+	}
+	for len(out) < height {
+		out = append(out, strings.Repeat(" ", width))
+	}
+	return out
+}
+
+func placeApartPlain(left, right string, width int) string {
+	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
 		gap = 1
 	}
-
-	line := left + strings.Repeat(" ", gap) + right
-	return HeaderStyle.Width(width).Render(line)
+	return truncate(left+strings.Repeat(" ", gap)+right, width)
 }
 
-// renderTabBar renders the view-switching tab bar.
-func (m *Model) renderTabBar(width int) string {
-	type tab struct {
-		key  string
-		name string
-		mode ViewMode
+func renderBarLines(lines []string, width int) string {
+	rendered := make([]string, 0, len(lines))
+	style := lipgloss.NewStyle().Width(width)
+	for _, line := range lines {
+		rendered = append(rendered, style.Render(padRight(truncate(line, width), width)))
 	}
-
-	tabs := []tab{
-		{"1", "Migrations", ViewMigrations},
-		{"2", "Gaps", ViewGaps},
-		{"3", "Help", ViewHelp},
-	}
-
-	var parts []string
-	for _, t := range tabs {
-		label := fmt.Sprintf(" %s %s ", t.key, t.name)
-		if m.viewMode == t.mode {
-			parts = append(parts, ActiveTabStyle.Render(label))
-		} else {
-			parts = append(parts, InactiveTabStyle.Render(label))
-		}
-	}
-
-	// Badge for gap count
-	if len(m.gaps) > 0 {
-		badge := TabBadgeStyle.Render(fmt.Sprintf(" %d", len(m.gaps)))
-		parts[1] = parts[1] + badge
-	}
-
-	tabLine := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
-	return lipgloss.NewStyle().Width(width).Padding(0, 1).Render(tabLine)
-}
-
-// renderFooter renders the bottom keybinding bar.
-func (m *Model) renderFooter(width int) string {
-	type binding struct {
-		key  string
-		desc string
-	}
-
-	var bindings []binding
-	switch m.viewMode {
-	case ViewMigrations:
-		bindings = []binding{
-			{"↑↓", "navigate"},
-			{"enter", "apply/rollback"},
-			{"u", "up"},
-			{"d", "down"},
-			{"r", "refresh"},
-			{"q", "quit"},
-		}
-	case ViewGaps:
-		bindings = []binding{
-			{"↑↓", "navigate"},
-			{"f", "fill"},
-			{"i", "ignore"},
-			{"r", "refresh"},
-			{"q", "quit"},
-		}
-	case ViewHelp:
-		bindings = []binding{
-			{"1", "migrations"},
-			{"2", "gaps"},
-			{"q", "quit"},
-		}
-	}
-
-	parts := make([]string, 0, len(bindings))
-	for _, b := range bindings {
-		parts = append(parts, FooterKeyStyle.Render(b.key)+" "+FooterDescStyle.Render(b.desc))
-	}
-
-	line := strings.Join(parts, FooterDescStyle.Render("  ·  "))
-	return FooterStyle.Width(width).Render(line)
-}
-
-// renderMessageBar renders the status message.
-func (m *Model) renderMessageBar(width int) string {
-	style := lipgloss.NewStyle().Width(width).Padding(0, 2)
-	switch m.messageType {
-	case MessageSuccess:
-		return style.Render(SuccessMsgStyle.Render("✓ " + m.message))
-	case MessageWarning:
-		return style.Render(WarningMsgStyle.Render("⚠ " + m.message))
-	case MessageError:
-		return style.Render(ErrorMsgStyle.Render("✗ " + m.message))
-	default:
-		return style.Render("  " + m.message)
-	}
-}
-
-// renderMigrationsView renders the full migrations view.
-func (m *Model) renderMigrationsView() string {
-	width := m.width
-	if width == 0 {
-		width = 80
-	}
-
-	var sections []string
-	sections = append(sections, m.renderHeader(width))
-	sections = append(sections, m.renderTabBar(width))
-	sections = append(sections, separator(width))
-
-	if m.loading {
-		sections = append(sections, fmt.Sprintf("\n  %s Loading migrations...\n", m.spinner.View()))
-		sections = append(sections, m.renderFooter(width))
-		return strings.Join(sections, "\n")
-	}
-
-	if m.err != nil {
-		sections = append(sections, ErrorStyle.Render(fmt.Sprintf("\n  Error: %v\n", m.err)))
-		sections = append(sections, m.renderFooter(width))
-		return strings.Join(sections, "\n")
-	}
-
-	// Stats + progress bar
-	applied, pending := 0, 0
-	for _, mig := range m.migrations {
-		if mig.Status == queen.StatusApplied {
-			applied++
-		} else {
-			pending++
-		}
-	}
-	total := len(m.migrations)
-
-	barWidth := 30
-	if width > 100 {
-		barWidth = 40
-	}
-	filledWidth := 0
-	if total > 0 {
-		filledWidth = (applied * barWidth) / total
-	}
-	bar := ProgressFilledStyle.Render(strings.Repeat("█", filledWidth)) +
-		ProgressEmptyStyle.Render(strings.Repeat("░", barWidth-filledWidth))
-
-	statsLine := fmt.Sprintf("  %s  %s/%d applied  %s pending",
-		bar,
-		AppliedStyle.Render(fmt.Sprintf("%d", applied)),
-		total,
-		PendingStyle.Render(fmt.Sprintf("%d", pending)),
-	)
-	sections = append(sections, statsLine)
-	sections = append(sections, separator(width))
-
-	if total == 0 {
-		sections = append(sections, "")
-		sections = append(sections, DetailStyle.Render("  No migrations found."))
-		sections = append(sections, "")
-	} else {
-		sections = append(sections, m.renderMigrationsList(width))
-	}
-
-	if m.message != "" {
-		sections = append(sections, m.renderMessageBar(width))
-	}
-
-	sections = append(sections, m.renderFooter(width))
-	return strings.Join(sections, "\n")
-}
-
-// renderMigrationsList renders the scrollable migrations list.
-func (m *Model) renderMigrationsList(width int) string {
-	var s strings.Builder
-	total := len(m.migrations)
-	visible := m.contentHeight()
-
-	start := m.scrollOffset
-	end := start + visible
-	if end > total {
-		end = total
-	}
-
-	// Scroll indicator (top)
-	if start > 0 {
-		s.WriteString(ScrollIndicatorStyle.Render(fmt.Sprintf("  ↑ %d more above", start)))
-		s.WriteString("\n")
-	}
-
-	for i := start; i < end; i++ {
-		mig := m.migrations[i]
-
-		cursor := "  "
-		if i == m.cursor {
-			cursor = iconCursor
-		}
-
-		// Status icon
-		statusIcon := iconEmpty
-		statusStyle := PendingStyle
-		if mig.Status == queen.StatusApplied {
-			statusIcon = iconSelected
-			statusStyle = AppliedStyle
-		}
-
-		// Badges
-		badges := ""
-		if mig.Destructive {
-			badges += " " + DestructiveBadgeStyle.Render("destructive")
-		}
-		if mig.HasRollback {
-			badges += " " + RollbackBadgeStyle.Render("↩")
-		}
-
-		line := fmt.Sprintf("%s%s %s %s%s",
-			cursor,
-			statusStyle.Render(statusIcon),
-			VersionStyle.Render(mig.Version),
-			NameStyle.Render(mig.Name),
-			badges,
-		)
-
-		if i == m.cursor {
-			// Pad to full width for selected background
-			lineWidth := lipgloss.Width(line)
-			if lineWidth < width-2 {
-				line += strings.Repeat(" ", width-2-lineWidth)
-			}
-			line = SelectedStyle.Render(line)
-		}
-
-		s.WriteString(line)
-		s.WriteString("\n")
-
-		// Detail line for selected applied item
-		if i == m.cursor && mig.Status == queen.StatusApplied && mig.AppliedAt != nil {
-			detail := fmt.Sprintf("       Applied: %s", mig.AppliedAt.Format("2006-01-02 15:04:05"))
-			s.WriteString(DetailStyle.Render(detail))
-			s.WriteString("\n")
-		}
-	}
-
-	// Scroll indicator (bottom)
-	if end < total {
-		s.WriteString(ScrollIndicatorStyle.Render(fmt.Sprintf("  ↓ %d more below", total-end)))
-		s.WriteString("\n")
-	}
-
-	return s.String()
-}
-
-// renderGapsView renders the full gaps detection view.
-func (m *Model) renderGapsView() string {
-	width := m.width
-	if width == 0 {
-		width = 80
-	}
-
-	var sections []string
-	sections = append(sections, m.renderHeader(width))
-	sections = append(sections, m.renderTabBar(width))
-	sections = append(sections, separator(width))
-
-	if m.loading {
-		sections = append(sections, fmt.Sprintf("\n  %s Detecting gaps...\n", m.spinner.View()))
-		sections = append(sections, m.renderFooter(width))
-		return strings.Join(sections, "\n")
-	}
-
-	if m.err != nil {
-		sections = append(sections, ErrorStyle.Render(fmt.Sprintf("\n  Error: %v\n", m.err)))
-		sections = append(sections, m.renderFooter(width))
-		return strings.Join(sections, "\n")
-	}
-
-	// Stats line
-	warnings, errors := 0, 0
-	for _, gap := range m.gaps {
-		switch gap.Severity {
-		case "warning":
-			warnings++
-		case "error":
-			errors++
-		}
-	}
-
-	if len(m.gaps) == 0 {
-		statsLine := "  " + AppliedStyle.Render("✓ No gaps detected — migrations are clean!")
-		sections = append(sections, statsLine)
-	} else {
-		statsLine := fmt.Sprintf("  Total: %d  ·  Warnings: %s  ·  Errors: %s",
-			len(m.gaps),
-			PendingStyle.Render(fmt.Sprintf("%d", warnings)),
-			ErrorStyle.Render(fmt.Sprintf("%d", errors)),
-		)
-		sections = append(sections, statsLine)
-	}
-	sections = append(sections, separator(width))
-
-	if len(m.gaps) > 0 {
-		sections = append(sections, m.renderGapsList(width))
-	} else {
-		sections = append(sections, "")
-	}
-
-	if m.message != "" {
-		sections = append(sections, m.renderMessageBar(width))
-	}
-
-	sections = append(sections, m.renderFooter(width))
-	return strings.Join(sections, "\n")
-}
-
-// renderGapsList renders the scrollable gaps list.
-func (m *Model) renderGapsList(width int) string {
-	var s strings.Builder
-	total := len(m.gaps)
-	visible := m.contentHeight()
-
-	start := m.scrollOffset
-	end := start + visible
-	if end > total {
-		end = total
-	}
-
-	if start > 0 {
-		s.WriteString(ScrollIndicatorStyle.Render(fmt.Sprintf("  ↑ %d more above", start)))
-		s.WriteString("\n")
-	}
-
-	for i := start; i < end; i++ {
-		gap := m.gaps[i]
-
-		cursor := "  "
-		if i == m.cursor {
-			cursor = iconCursor
-		}
-
-		icon := "⚠"
-		iconStyle := PendingStyle
-		if gap.Severity == "error" {
-			icon = "✗"
-			iconStyle = ErrorStyle
-		}
-
-		typeLabel := string(gap.Type)
-		switch gap.Type {
-		case queen.GapTypeNumbering:
-			typeLabel = "numbering"
-		case queen.GapTypeApplication:
-			typeLabel = "application"
-		case queen.GapTypeUnregistered:
-			typeLabel = "unregistered"
-		}
-
-		typeBadge := GapTypeBadgeStyle.Render("[" + typeLabel + "]")
-
-		line := fmt.Sprintf("%s%s %s %s",
-			cursor,
-			iconStyle.Render(icon),
-			typeBadge,
-			VersionStyle.Render(gap.Version),
-		)
-
-		if gap.Name != "" {
-			line += " " + NameStyle.Render(gap.Name)
-		}
-
-		if i == m.cursor {
-			lineWidth := lipgloss.Width(line)
-			if lineWidth < width-2 {
-				line += strings.Repeat(" ", width-2-lineWidth)
-			}
-			line = SelectedStyle.Render(line)
-		}
-
-		s.WriteString(line)
-		s.WriteString("\n")
-
-		// Detail for selected gap
-		if i == m.cursor {
-			desc := "       " + gap.Description
-			if len(gap.BlockedBy) > 0 {
-				desc += "\n       Blocks: " + strings.Join(gap.BlockedBy, ", ")
-			}
-			s.WriteString(DetailStyle.Render(desc))
-			s.WriteString("\n")
-		}
-	}
-
-	if end < total {
-		s.WriteString(ScrollIndicatorStyle.Render(fmt.Sprintf("  ↓ %d more below", total-end)))
-		s.WriteString("\n")
-	}
-
-	return s.String()
-}
-
-// renderHelpView renders the help view.
-func (m *Model) renderHelpView() string {
-	width := m.width
-	if width == 0 {
-		width = 80
-	}
-
-	sections := make([]string, 0, 7)
-	sections = append(sections, m.renderHeader(width))
-	sections = append(sections, m.renderTabBar(width))
-	sections = append(sections, separator(width))
-	sections = append(sections, "")
-
-	var help strings.Builder
-
-	help.WriteString(HelpSectionStyle.Render("Navigation"))
-	help.WriteString("\n")
-	help.WriteString(helpLine("↑/k", "Move cursor up"))
-	help.WriteString(helpLine("↓/j", "Move cursor down"))
-	help.WriteString(helpLine("g", "Jump to top"))
-	help.WriteString(helpLine("G", "Jump to bottom"))
-	help.WriteString("\n")
-
-	help.WriteString(HelpSectionStyle.Render("Views"))
-	help.WriteString("\n")
-	help.WriteString(helpLine("1", "Migrations view"))
-	help.WriteString(helpLine("2", "Gaps detection view"))
-	help.WriteString(helpLine("3 / ?", "Help view"))
-	help.WriteString("\n")
-
-	help.WriteString(HelpSectionStyle.Render("Migrations Actions"))
-	help.WriteString("\n")
-	help.WriteString(helpLine("enter", "Apply pending / rollback applied"))
-	help.WriteString(helpLine("u", "Apply migration up to cursor"))
-	help.WriteString(helpLine("d", "Rollback migration from cursor"))
-	help.WriteString("\n")
-
-	help.WriteString(HelpSectionStyle.Render("Gaps Actions"))
-	help.WriteString("\n")
-	help.WriteString(helpLine("enter / f", "Fill the selected gap"))
-	help.WriteString(helpLine("i", "Ignore gap (add to .queenignore)"))
-	help.WriteString("\n")
-
-	help.WriteString(HelpSectionStyle.Render("General"))
-	help.WriteString("\n")
-	help.WriteString(helpLine("r", "Refresh data"))
-	help.WriteString(helpLine("q / Ctrl+C", "Quit"))
-	help.WriteString("\n\n")
-
-	help.WriteString(HelpSectionStyle.Render("Tips"))
-	help.WriteString("\n")
-	help.WriteString(DetailStyle.Render("  ● Applied migrations are shown in green"))
-	help.WriteString("\n")
-	help.WriteString(DetailStyle.Render("  ○ Pending migrations are shown in yellow"))
-	help.WriteString("\n")
-	help.WriteString(DetailStyle.Render("  ↩ Indicates rollback script is available"))
-	help.WriteString("\n")
-
-	maxWidth := 64
-	if width < maxWidth+6 {
-		maxWidth = width - 6
-	}
-	if maxWidth < 30 {
-		maxWidth = 30
-	}
-
-	helpBox := InfoBoxStyle.Width(maxWidth).Render(help.String())
-	centered := lipgloss.PlaceHorizontal(width, lipgloss.Center, helpBox)
-	sections = append(sections, centered)
-	sections = append(sections, "")
-
-	sections = append(sections, m.renderFooter(width))
-	return strings.Join(sections, "\n")
-}
-
-func helpLine(key, desc string) string {
-	return fmt.Sprintf("  %s  %s\n",
-		HelpKeyStyle.Render(fmt.Sprintf("%-12s", key)),
-		HelpDescStyle.Render(desc),
-	)
+	return strings.Join(rendered, "\n")
 }

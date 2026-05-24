@@ -4,13 +4,13 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/honeynil/queen"
-	"github.com/honeynil/queen/drivers/clickhouse"
-	"github.com/honeynil/queen/drivers/cockroachdb"
-	"github.com/honeynil/queen/drivers/mssql"
-	"github.com/honeynil/queen/drivers/mysql"
-	"github.com/honeynil/queen/drivers/postgres"
-	"github.com/honeynil/queen/drivers/sqlite"
+	"github.com/yaop-labs/queen"
+	"github.com/yaop-labs/queen/drivers/clickhouse"
+	"github.com/yaop-labs/queen/drivers/cockroachdb"
+	"github.com/yaop-labs/queen/drivers/mssql"
+	"github.com/yaop-labs/queen/drivers/mysql"
+	"github.com/yaop-labs/queen/drivers/postgres"
+	"github.com/yaop-labs/queen/drivers/sqlite"
 )
 
 const (

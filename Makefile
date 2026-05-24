@@ -109,11 +109,11 @@ lint:
 
 fmt:
 	@echo "==> Checking code formatting..."
-	@gofmt -l . | grep -v '^$$' && echo "Error: Files need formatting. Run 'gofmt -w .'" && exit 1 || echo "All files are formatted"
+	@find . -name '*.go' -print0 | xargs -0 gofmt -l | grep -v '^$$' && echo "Error: Files need formatting. Run 'make fmt-fix'" && exit 1 || echo "All files are formatted"
 
 fmt-fix:
 	@echo "==> Formatting code..."
-	gofmt -w .
+	find . -name '*.go' -print0 | xargs -0 gofmt -w
 	@echo "Code formatted"
 
 vet:

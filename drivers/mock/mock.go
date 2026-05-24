@@ -14,14 +14,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/honeynil/queen"
-	_ "github.com/mattn/go-sqlite3" // SQLite driver for in-memory DB
+	_ "github.com/mattn/go-sqlite3"
+	"github.com/yaop-labs/queen"
 )
 
 // Driver is an in-memory mock implementation of queen.Driver for testing.
 type Driver struct {
 	mu        sync.Mutex
-	db        *sql.DB // In-memory SQLite database
+	db        *sql.DB
 	applied   map[string]queen.Applied
 	locked    bool
 	initErr   error
@@ -34,8 +34,6 @@ type Driver struct {
 // The in-memory database allows SQL migrations to be executed for testing,
 // but data is not persisted and is lost when the driver is closed.
 func New() *Driver {
-	// Create in-memory SQLite database
-	// Using ":memory:" creates a new database in RAM
 	db, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
 		panic("mock driver: failed to create in-memory database: " + err.Error())
@@ -78,7 +76,6 @@ func (d *Driver) Init(ctx context.Context) error {
 		return d.initErr
 	}
 
-	// Already initialized (applied map exists)
 	return nil
 }
 
@@ -92,7 +89,6 @@ func (d *Driver) GetApplied(ctx context.Context) ([]queen.Applied, error) {
 		result = append(result, a)
 	}
 
-	// Sort by applied time
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].AppliedAt.Before(result[j].AppliedAt)
 	})
@@ -116,7 +112,6 @@ func (d *Driver) Record(ctx context.Context, m *queen.Migration, meta *queen.Mig
 		Checksum:  m.Checksum(),
 	}
 
-	// Add metadata if provided
 	if meta != nil {
 		applied.AppliedBy = meta.AppliedBy
 		applied.DurationMS = meta.DurationMS

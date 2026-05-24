@@ -7,11 +7,7 @@ import (
 	"strings"
 )
 
-// Calculate computes a SHA-256 checksum of the given migration content.
-// It concatenates all provided strings and returns the hex-encoded hash.
-//
-// Whitespace is normalized before hashing to prevent false "modified" status
-// when users reformat SQL without changing the actual logic.
+// Calculate hashes migration SQL after whitespace normalization.
 func Calculate(content ...string) string {
 	h := sha256.New()
 
@@ -23,9 +19,6 @@ func Calculate(content ...string) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-// normalizeWhitespace removes leading/trailing whitespace from each line
-// and collapses multiple blank lines into one.
-// This ensures formatting changes don't affect the checksum.
 func normalizeWhitespace(s string) string {
 	lines := strings.Split(s, "\n")
 	result := make([]string, 0, len(lines))
@@ -34,7 +27,6 @@ func normalizeWhitespace(s string) string {
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 
-		// Skip consecutive empty lines
 		if trimmed == "" {
 			if !prevEmpty {
 				result = append(result, "")
@@ -46,6 +38,5 @@ func normalizeWhitespace(s string) string {
 		result = append(result, trimmed)
 	}
 
-	// Trim leading/trailing empty lines from result
 	return strings.TrimSpace(strings.Join(result, "\n"))
 }

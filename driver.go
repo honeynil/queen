@@ -18,6 +18,20 @@ type Driver interface {
 	Close() error
 }
 
+// TransactionalRecorder is an optional Driver capability. When implemented,
+// Queen records or removes the migration row inside the same transaction as the
+// migration body, so schema/data changes and migration metadata commit together.
+type TransactionalRecorder interface {
+	RecordTx(ctx context.Context, tx *sql.Tx, m *Migration, meta *MigrationMetadata) error
+	RemoveTx(ctx context.Context, tx *sql.Tx, version string) error
+}
+
+// SQLDBProvider is implemented by drivers that can expose their underlying
+// database handle for optional diagnostics such as EXPLAIN.
+type SQLDBProvider interface {
+	SQLDB() *sql.DB
+}
+
 // MigrationMetadata contains metadata collected during migration execution.
 type MigrationMetadata struct {
 	AppliedBy    string

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sync"
 	"testing"
 )
 
@@ -128,6 +129,37 @@ func TestMigrationChecksum(t *testing.T) {
 			t.Errorf("Expected '%s', got %s", noChecksumMarker, m.Checksum())
 		}
 	})
+
+	t.Run("parallel calls return one stable checksum", func(t *testing.T) {
+		m := Migration{
+			Version: "001",
+			Name:    "test",
+			UpSQL:   "CREATE TABLE users (id INT, email TEXT)",
+			DownSQL: "DROP TABLE users",
+		}
+		want := m.Checksum()
+
+		const goroutines = 64
+		const callsPerGoroutine = 128
+
+		var wg sync.WaitGroup
+		errs := make(chan string, goroutines*callsPerGoroutine)
+		for range goroutines {
+			wg.Go(func() {
+				for range callsPerGoroutine {
+					if got := m.Checksum(); got != want {
+						errs <- got
+					}
+				}
+			})
+		}
+		wg.Wait()
+		close(errs)
+
+		for got := range errs {
+			t.Fatalf("parallel Checksum() = %q, want %q", got, want)
+		}
+	})
 }
 
 func TestMigrationHasRollback(t *testing.T) {
@@ -245,7 +277,7 @@ func TestMigrationIsDestructive(t *testing.T) {
 	}
 }
 
-func TestMigrationExecuteUp(t *testing.T) {
+func TestRunUpRejectsMigrationWithoutUp(t *testing.T) {
 	t.Run("invalid migration", func(t *testing.T) {
 		m := Migration{
 			Version: "001",
@@ -253,28 +285,9 @@ func TestMigrationExecuteUp(t *testing.T) {
 			// No Up method
 		}
 
-		err := m.executeUp(context.Background(), nil)
+		err := (&Queen{}).runUp(context.Background(), nil, &m)
 		if !errors.Is(err, ErrInvalidMigration) {
 			t.Errorf("Expected ErrInvalidMigration, got %v", err)
-		}
-	})
-
-	t.Run("UpFunc takes precedence", func(t *testing.T) {
-		called := false
-		m := Migration{
-			Version: "001",
-			Name:    "test",
-			UpSQL:   "should not be used",
-			UpFunc: func(ctx context.Context, tx *sql.Tx) error {
-				called = true
-				return nil
-			},
-		}
-
-		_ = m.executeUp(context.Background(), nil)
-
-		if !called {
-			t.Error("UpFunc was not called")
 		}
 	})
 }

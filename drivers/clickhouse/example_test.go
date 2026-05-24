@@ -10,8 +10,8 @@ import (
 
 	_ "github.com/ClickHouse/clickhouse-go/v2" // modern driver (recommended in 2026)
 
-	"github.com/honeynil/queen"
-	"github.com/honeynil/queen/drivers/clickhouse"
+	"github.com/yaop-labs/queen"
+	"github.com/yaop-labs/queen/drivers/clickhouse"
 )
 
 // Example demonstrates basic usage of the ClickHouse driver.

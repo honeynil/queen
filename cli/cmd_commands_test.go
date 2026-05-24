@@ -3,7 +3,7 @@ package cli
 import (
 	"testing"
 
-	"github.com/honeynil/queen"
+	"github.com/yaop-labs/queen"
 )
 
 func TestUpCmd(t *testing.T) {

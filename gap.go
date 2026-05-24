@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	naturalsort "github.com/honeynil/queen/internal/sort"
+	naturalsort "github.com/yaop-labs/queen/internal/sort"
 )
 
 type GapType string
@@ -30,6 +30,9 @@ type Gap struct {
 
 // DetectGaps analyzes migrations and returns any detected gaps.
 func (q *Queen) DetectGaps(ctx context.Context) ([]Gap, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	if q.driver == nil {
 		return nil, ErrNoDriver
 	}
@@ -83,7 +86,7 @@ func (q *Queen) detectApplicationGaps() ([]Gap, []Gap) {
 				Name:        applied.Name,
 				Description: fmt.Sprintf("Migration %s (%s) is applied in database but not registered in code", version, applied.Name),
 				Severity:    "error",
-				AppliedAt:   strPtr(applied.AppliedAt.Format("2006-01-02 15:04:05")),
+				AppliedAt:   new(applied.AppliedAt.Format("2006-01-02 15:04:05")),
 			})
 		}
 	}
@@ -142,7 +145,7 @@ func (q *Queen) detectNumberingGaps() []Gap {
 	versionMap := make(map[int]string)
 
 	for _, m := range q.migrations {
-		num, err := strconv.Atoi(strings.TrimLeft(m.Version, "0"))
+		num, err := numericVersion(m.Version)
 		if err != nil {
 			continue
 		}
@@ -178,8 +181,12 @@ func (q *Queen) detectNumberingGaps() []Gap {
 	return gaps
 }
 
-func strPtr(s string) *string {
-	return &s
+func numericVersion(version string) (int, error) {
+	trimmed := strings.TrimLeft(version, "0")
+	if trimmed == "" {
+		trimmed = "0"
+	}
+	return strconv.Atoi(trimmed)
 }
 
 func (q *Queen) filterIgnoredGaps(gaps []Gap) []Gap {

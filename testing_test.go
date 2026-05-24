@@ -3,8 +3,8 @@ package queen_test
 import (
 	"testing"
 
-	"github.com/honeynil/queen"
-	"github.com/honeynil/queen/drivers/mock"
+	"github.com/yaop-labs/queen"
+	"github.com/yaop-labs/queen/drivers/mock"
 )
 
 func TestTestHelper_TestRollback(t *testing.T) {

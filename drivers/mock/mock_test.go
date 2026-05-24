@@ -6,8 +6,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/honeynil/queen"
-	"github.com/honeynil/queen/drivers/mock"
+	"github.com/yaop-labs/queen"
+	"github.com/yaop-labs/queen/drivers/mock"
 )
 
 func TestMockDriver_Integration(t *testing.T) {

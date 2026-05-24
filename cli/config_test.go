@@ -238,6 +238,51 @@ func TestGetEnvironmentName(t *testing.T) {
 	}
 }
 
+func TestRedactDSN(t *testing.T) {
+	tests := []struct {
+		name string
+		dsn  string
+		want string
+	}{
+		{
+			name: "postgres url password",
+			dsn:  "postgres://user:secret@localhost:5432/app?sslmode=disable",
+			want: "postgres://user:redacted@localhost:5432/app?sslmode=disable",
+		},
+		{
+			name: "mysql tcp dsn",
+			dsn:  "user:secret@tcp(localhost:3306)/app?parseTime=true",
+			want: "user:redacted@tcp(localhost:3306)/app?parseTime=true",
+		},
+		{
+			name: "mssql url password",
+			dsn:  "sqlserver://sa:secret@localhost:1433?database=app",
+			want: "sqlserver://sa:redacted@localhost:1433?database=app",
+		},
+		{
+			name: "key value password",
+			dsn:  "server=localhost;user id=sa;password=secret;database=app",
+			want: "server=localhost;user id=sa;password=redacted;database=app",
+		},
+		{
+			name: "no secret",
+			dsn:  "./app.db?_journal_mode=WAL",
+			want: "./app.db?_journal_mode=WAL",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := redactDSN(tt.dsn); got != tt.want {
+				t.Fatalf("redactDSN() = %q, want %q", got, tt.want)
+			}
+			if strings.Contains(redactDSN(tt.dsn), "secret") {
+				t.Fatalf("redactDSN() leaked secret in %q", tt.dsn)
+			}
+		})
+	}
+}
+
 func TestEnvironmentLockTimeout(t *testing.T) {
 	tempDir := t.TempDir()
 

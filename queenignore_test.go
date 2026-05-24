@@ -3,6 +3,7 @@ package queen
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -185,6 +186,30 @@ func TestAddIgnore(t *testing.T) {
 	}
 }
 
+func TestAddIgnoreInitializesZeroValue(t *testing.T) {
+	tempDir := t.TempDir()
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var qi QueenIgnore
+	if err := qi.AddIgnore("001", "from zero value", "test"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !qi.IsIgnored("001") {
+		t.Fatal("001 should be ignored after zero-value AddIgnore")
+	}
+	if _, err := os.Stat(".queenignore"); err != nil {
+		t.Fatalf(".queenignore should exist after zero-value AddIgnore: %v", err)
+	}
+}
+
 func TestRemoveIgnore(t *testing.T) {
 	t.Parallel()
 
@@ -242,6 +267,42 @@ func TestSave(t *testing.T) {
 	}
 	if !contains(contentStr, "skipped") {
 		t.Error("file should contain reason 'skipped'")
+	}
+}
+
+func TestSaveWritesIgnoredGapsInNaturalVersionOrder(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, ".queenignore")
+
+	qi := &QueenIgnore{
+		filePath: path,
+		ignored: map[string]*IgnoredGap{
+			"010": {Version: "010"},
+			"002": {Version: "002"},
+			"001": {Version: "001"},
+		},
+	}
+
+	if err := qi.Save(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read file: %v", err)
+	}
+
+	body := string(content)
+	pos001 := strings.Index(body, "\n001\n")
+	pos002 := strings.Index(body, "\n002\n")
+	pos010 := strings.Index(body, "\n010\n")
+	if pos001 == -1 || pos002 == -1 || pos010 == -1 {
+		t.Fatalf("saved file is missing expected versions:\n%s", body)
+	}
+	if pos001 >= pos002 || pos002 >= pos010 {
+		t.Fatalf("versions are not in natural order:\n%s", body)
 	}
 }
 

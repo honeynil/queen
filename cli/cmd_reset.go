@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"github.com/yaop-labs/queen"
 )
 
 func (app *App) resetCmd() *cobra.Command {
@@ -12,8 +13,6 @@ func (app *App) resetCmd() *cobra.Command {
 		Use:   "reset",
 		Short: "Rollback all migrations",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := context.Background()
-
 			operation := "RESET ALL MIGRATIONS (WARNING: DESTRUCTIVE)"
 			if err := app.checkConfirmation(operation); err != nil {
 				return err
@@ -25,18 +24,14 @@ func (app *App) resetCmd() *cobra.Command {
 				}
 			}
 
-			q, err := app.setupQueen(ctx)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = q.Close() }()
+			return app.runWithQueen(cmd, func(ctx context.Context, q *queen.Queen) error {
+				if err := q.Reset(ctx); err != nil {
+					return fmt.Errorf("failed to reset migrations: %w", err)
+				}
 
-			if err := q.Reset(ctx); err != nil {
-				return fmt.Errorf("failed to reset migrations: %w", err)
-			}
-
-			fmt.Println("All migrations have been rolled back")
-			return nil
+				fmt.Println("All migrations have been rolled back")
+				return nil
+			})
 		},
 	}
 }

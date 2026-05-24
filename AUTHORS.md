@@ -9,7 +9,7 @@ source control or https://github.com/honeynil/queen/graphs/contributors
 
 ## Main Author
 
-- **[@honeynil](https://github.com/honeynil)** - Creator and primary maintainer
+- **[@dmedovich](https://github.com/dmedovich)** - Creator and primary maintainer
 
 ## Contributors
 

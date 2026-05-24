@@ -2,13 +2,11 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
-	"github.com/honeynil/queen"
 	"github.com/spf13/cobra"
+	"github.com/yaop-labs/queen"
 )
 
 func (app *App) explainCmd() *cobra.Command {
@@ -17,33 +15,28 @@ func (app *App) explainCmd() *cobra.Command {
 		Short: "Explain a specific migration",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := context.Background()
 			version := args[0]
 
-			q, err := app.setupQueen(ctx)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = q.Close() }()
+			return app.runWithQueen(cmd, func(ctx context.Context, q *queen.Queen) error {
+				plan, err := q.Explain(ctx, version)
+				if err != nil {
+					return fmt.Errorf("failed to explain migration: %w", err)
+				}
 
-			plan, err := q.Explain(ctx, version)
-			if err != nil {
-				return fmt.Errorf("failed to explain migration: %w", err)
-			}
-
-			if app.config.JSON {
-				return app.outputExplainJSON(plan)
-			}
-			app.outputExplainTable(plan)
-			return nil
+				if app.config.JSON {
+					return app.outputExplainJSON(plan)
+				}
+				app.outputExplainTable(plan)
+				return nil
+			})
 		},
 	}
 }
 
 func (app *App) outputExplainTable(plan *queen.MigrationPlan) {
 	fmt.Printf("Migration: %s\n", plan.Version)
-	fmt.Println(strings.Repeat("━", 60))
-	fmt.Println()
+	outputRule("━", 60)
+	outputBlank()
 
 	fmt.Printf("Name:          %s\n", plan.Name)
 	fmt.Printf("Status:        %s\n", plan.Status)
@@ -53,31 +46,29 @@ func (app *App) outputExplainTable(plan *queen.MigrationPlan) {
 	fmt.Printf("Checksum:      %s\n", plan.Checksum)
 
 	if plan.IsDestructive {
-		fmt.Printf("Destructive:   WARNING: YES\n")
+		fmt.Println("Destructive:   yes")
 	}
 
 	if len(plan.Warnings) > 0 {
-		fmt.Println()
-		fmt.Println("WARNING: Warnings:")
+		outputBlank()
+		outputWarning("Warnings:")
 		for _, warning := range plan.Warnings {
 			fmt.Printf("  - %s\n", warning)
 		}
 	}
 
 	if plan.SQL != "" {
-		fmt.Println()
+		outputBlank()
 		fmt.Printf("%s SQL:\n", strings.ToUpper(plan.Direction))
-		fmt.Println(strings.Repeat("-", 60))
+		outputRule("-", 60)
 		fmt.Println(plan.SQL)
-		fmt.Println(strings.Repeat("-", 60))
+		outputRule("-", 60)
 	} else if plan.Type == queen.MigrationTypeGoFunc {
-		fmt.Println()
+		outputBlank()
 		fmt.Printf("%s: Go function (code not shown)\n", strings.ToUpper(plan.Direction))
 	}
 }
 
 func (app *App) outputExplainJSON(plan *queen.MigrationPlan) error {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(plan)
+	return outputJSON(plan)
 }

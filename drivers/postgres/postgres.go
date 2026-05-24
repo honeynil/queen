@@ -4,17 +4,23 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"hash/fnv"
+	"sync"
 	"time"
 
-	"github.com/honeynil/queen"
-	"github.com/honeynil/queen/drivers/base"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/yaop-labs/queen"
+	"github.com/yaop-labs/queen/drivers/base"
 )
 
 // Driver implements the queen.Driver interface for PostgreSQL.
 type Driver struct {
 	base.Driver
 	lockID   int64
+	lockMu   sync.Mutex
 	lockConn *sql.Conn
 }
 
@@ -37,6 +43,20 @@ func NewWithTableName(db *sql.DB, tableName string) *Driver {
 		},
 		lockID: hashTableName(tableName),
 	}
+}
+
+// NewFromPool creates a PostgreSQL driver from a native pgx pool.
+//
+// The returned driver uses database/sql through pgx's stdlib adapter. Closing
+// the driver closes only the adapter handle; it does not close the pgx pool.
+func NewFromPool(pool *pgxpool.Pool) *Driver {
+	return NewFromPoolWithTableName(pool, "queen_migrations")
+}
+
+// NewFromPoolWithTableName creates a PostgreSQL driver from a native pgx pool
+// with a custom migration table name.
+func NewFromPoolWithTableName(pool *pgxpool.Pool, tableName string) *Driver {
+	return NewWithTableName(stdlib.OpenDBFromPool(pool), tableName)
 }
 
 // Init creates the migrations tracking table if it doesn't exist.
@@ -82,6 +102,14 @@ func (d *Driver) Init(ctx context.Context) error {
 
 // Lock acquires an advisory lock to prevent concurrent migrations.
 func (d *Driver) Lock(ctx context.Context, timeout time.Duration) error {
+	d.lockMu.Lock()
+	defer d.lockMu.Unlock()
+
+	if d.lockConn != nil {
+		return fmt.Errorf("postgres driver already holds advisory lock '%d' for table '%s'",
+			d.lockID, d.TableName)
+	}
+
 	conn, err := d.DB.Conn(ctx)
 	if err != nil {
 		return err
@@ -93,7 +121,7 @@ func (d *Driver) Lock(ctx context.Context, timeout time.Duration) error {
 	_, err = conn.ExecContext(lockCtx, "SELECT pg_advisory_lock($1)", d.lockID)
 	if err != nil {
 		_ = conn.Close()
-		if lockCtx.Err() == context.DeadlineExceeded {
+		if errors.Is(lockCtx.Err(), context.DeadlineExceeded) {
 			return fmt.Errorf("%w: failed to acquire advisory lock '%d' for table '%s'",
 				queen.ErrLockTimeout, d.lockID, d.TableName)
 		}
@@ -106,15 +134,19 @@ func (d *Driver) Lock(ctx context.Context, timeout time.Duration) error {
 
 // Unlock releases the advisory lock.
 func (d *Driver) Unlock(ctx context.Context) error {
+	d.lockMu.Lock()
+	defer d.lockMu.Unlock()
+
 	if d.lockConn == nil {
 		return nil
 	}
+	conn := d.lockConn
 	defer func() {
-		_ = d.lockConn.Close()
+		_ = conn.Close()
 		d.lockConn = nil
 	}()
 
-	_, err := d.lockConn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", d.lockID)
+	_, err := conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", d.lockID)
 	if err != nil {
 		return fmt.Errorf("failed to release advisory lock '%d' for table '%s': %w",
 			d.lockID, d.TableName, err)
@@ -122,11 +154,19 @@ func (d *Driver) Unlock(ctx context.Context) error {
 	return nil
 }
 
-// hashTableName creates a unique int64 hash from the table name for advisory locks.
+// RecordTx records an applied migration in the migration transaction.
+func (d *Driver) RecordTx(ctx context.Context, tx *sql.Tx, m *queen.Migration, meta *queen.MigrationMetadata) error {
+	return base.RecordTx(ctx, &d.Driver, tx, m, meta)
+}
+
+// RemoveTx removes a migration record in the rollback transaction.
+func (d *Driver) RemoveTx(ctx context.Context, tx *sql.Tx, version string) error {
+	return base.RemoveTx(ctx, &d.Driver, tx, version)
+}
+
+// hashTableName creates a stable int64 key from the table name for advisory locks.
 func hashTableName(name string) int64 {
-	var hash int64
-	for i, c := range name {
-		hash = hash*31 + int64(c) + int64(i)
-	}
-	return hash
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(name))
+	return int64(h.Sum64())
 }

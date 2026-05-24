@@ -9,25 +9,30 @@ import (
 	"os/user"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
-	naturalsort "github.com/honeynil/queen/internal/sort"
+	naturalsort "github.com/yaop-labs/queen/internal/sort"
+	"github.com/yaop-labs/queen/tap"
 )
 
 const (
-	DirectionUp       = "up"
-	DirectionDown     = "down"
-	DriverUnknown     = "unknown"
-	driverNameUnknown = "DriverUnknown"
+	DirectionUp          = "up"
+	DirectionDown        = "down"
+	DriverUnknown        = "unknown"
+	driverNameUnknown    = "DriverUnknown"
+	defaultUnlockTimeout = 30 * time.Second
 )
 
 // Queen manages database migrations.
 type Queen struct {
+	mu         sync.RWMutex
 	driver     Driver
 	migrations []*Migration
 	config     *Config
 	logger     Logger
 	applied    map[string]*Applied
+	tap        tap.Sink
 }
 
 // Config configures Queen behavior.
@@ -61,6 +66,25 @@ func WithLogger(logger Logger) Option {
 	}
 }
 
+// WithTap installs a tap.Sink that receives a start/exec/end event for every
+// migration. SQL migrations emit a single exec event with the full SQL text;
+// Go-function migrations can opt into per-statement tapping by calling
+// tap.ObserveTx(ctx, tx) and using the wrapper's ExecContext/QueryContext methods.
+func WithTap(sink tap.Sink) Option {
+	return func(q *Queen) {
+		q.tap = sink
+	}
+}
+
+// SetTap replaces the active tap sink. It is intended for interactive tools
+// that need to enable tap only around a specific operation.
+func (q *Queen) SetTap(sink tap.Sink) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	q.tap = sink
+}
+
 // New creates a Queen instance with default configuration.
 func New(driver Driver, opts ...Option) *Queen {
 	q := NewWithConfig(driver, DefaultConfig())
@@ -71,25 +95,41 @@ func New(driver Driver, opts ...Option) *Queen {
 }
 
 // NewWithConfig creates a Queen instance with custom configuration.
-func NewWithConfig(driver Driver, config *Config) *Queen {
-	if config == nil {
-		config = DefaultConfig()
-	}
+func NewWithConfig(driver Driver, config *Config, opts ...Option) *Queen {
+	config = normalizeConfig(config)
 
-	if config.TableName == "" {
-		config.TableName = "queen_migrations"
-	}
-	if config.LockTimeout <= 0 {
-		config.LockTimeout = 30 * time.Minute
-	}
-
-	return &Queen{
+	q := &Queen{
 		driver:     driver,
 		migrations: make([]*Migration, 0),
 		config:     config,
 		logger:     defaultLogger(),
 		applied:    make(map[string]*Applied),
 	}
+	for _, opt := range opts {
+		opt(q)
+	}
+	return q
+}
+
+func normalizeConfig(config *Config) *Config {
+	if config == nil {
+		return DefaultConfig()
+	}
+
+	normalized := *config
+	if config.Naming != nil {
+		naming := *config.Naming
+		normalized.Naming = &naming
+	}
+
+	if normalized.TableName == "" {
+		normalized.TableName = "queen_migrations"
+	}
+	if normalized.LockTimeout <= 0 {
+		normalized.LockTimeout = 30 * time.Minute
+	}
+
+	return &normalized
 }
 
 // Add registers a migration. Returns ErrVersionConflict if version already exists.
@@ -97,6 +137,9 @@ func (q *Queen) Add(m M) error {
 	if err := m.Validate(); err != nil {
 		return err
 	}
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
 
 	for _, existing := range q.migrations {
 		if existing.Version == m.Version {
@@ -117,7 +160,6 @@ func (q *Queen) Add(m M) error {
 		}
 	}
 
-	// Store pointer to prevent mutation after registration
 	migration := m
 	q.migrations = append(q.migrations, &migration)
 
@@ -138,6 +180,9 @@ func (q *Queen) Up(ctx context.Context) error {
 
 // UpSteps applies up to n pending migrations. If n <= 0, applies all.
 func (q *Queen) UpSteps(ctx context.Context, n int) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	if q.driver == nil {
 		return ErrNoDriver
 	}
@@ -157,6 +202,9 @@ func (q *Queen) UpSteps(ctx context.Context, n int) error {
 	defer unlock()
 
 	if err := q.loadApplied(ctx); err != nil {
+		return err
+	}
+	if err := q.validateAppliedChecksumsLocked(ctx); err != nil {
 		return err
 	}
 
@@ -180,6 +228,9 @@ func (q *Queen) UpSteps(ctx context.Context, n int) error {
 
 // Down rolls back the last n migrations. If n <= 0, rolls back only the last migration.
 func (q *Queen) Down(ctx context.Context, n int) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	if n <= 0 {
 		n = 1
 	}
@@ -199,6 +250,9 @@ func (q *Queen) Down(ctx context.Context, n int) error {
 	defer unlock()
 
 	if err := q.loadApplied(ctx); err != nil {
+		return err
+	}
+	if err := q.validateAppliedChecksumsLocked(ctx); err != nil {
 		return err
 	}
 
@@ -228,6 +282,9 @@ func (q *Queen) Down(ctx context.Context, n int) error {
 
 // Reset rolls back all applied migrations.
 func (q *Queen) Reset(ctx context.Context) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	if q.driver == nil {
 		return ErrNoDriver
 	}
@@ -245,13 +302,15 @@ func (q *Queen) Reset(ctx context.Context) error {
 	if err := q.loadApplied(ctx); err != nil {
 		return err
 	}
+	if err := q.validateAppliedChecksumsLocked(ctx); err != nil {
+		return err
+	}
 
 	applied := q.getAppliedMigrations()
 	if len(applied) == 0 {
 		return nil
 	}
 
-	// Don't call Down() to avoid double-locking
 	for _, m := range applied {
 		if !m.HasRollback() {
 			return newMigrationError(m.Version, m.Name, DirectionDown, q.getDriverName(), fmt.Errorf("no down migration defined"))
@@ -267,6 +326,9 @@ func (q *Queen) Reset(ctx context.Context) error {
 
 // Status returns the status of all registered migrations.
 func (q *Queen) Status(ctx context.Context) ([]MigrationStatus, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	if q.driver == nil {
 		return nil, ErrNoDriver
 	}
@@ -294,7 +356,6 @@ func (q *Queen) Status(ctx context.Context) ([]MigrationStatus, error) {
 			status.Status = StatusApplied
 			status.AppliedAt = &applied.AppliedAt
 
-			// Check for checksum mismatch
 			if applied.Checksum != m.Checksum() && m.Checksum() != noChecksumMarker {
 				status.Status = StatusModified
 			}
@@ -303,11 +364,18 @@ func (q *Queen) Status(ctx context.Context) ([]MigrationStatus, error) {
 		statuses[i] = status
 	}
 
+	sort.Slice(statuses, func(i, j int) bool {
+		return naturalsort.Compare(statuses[i].Version, statuses[j].Version) < 0
+	})
+
 	return statuses, nil
 }
 
 // Validate checks for duplicate versions, invalid migrations, and checksum mismatches.
 func (q *Queen) Validate(ctx context.Context) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	if len(q.migrations) == 0 {
 		return ErrNoMigrations
 	}
@@ -333,18 +401,8 @@ func (q *Queen) Validate(ctx context.Context) error {
 			return err
 		}
 
-		for _, m := range q.migrations {
-			if applied, ok := q.applied[m.Version]; ok {
-				if applied.Checksum != m.Checksum() && m.Checksum() != noChecksumMarker {
-					q.logger.ErrorContext(ctx, "checksum mismatch detected",
-						"version", m.Version,
-						"name", m.Name,
-						"expected_checksum", applied.Checksum,
-						"actual_checksum", m.Checksum())
-					return fmt.Errorf("%w: migration %s (expected %s, got %s)",
-						ErrChecksumMismatch, m.Version, applied.Checksum, m.Checksum())
-				}
-			}
+		if err := q.validateAppliedChecksumsLocked(ctx); err != nil {
+			return err
 		}
 	}
 
@@ -354,6 +412,9 @@ func (q *Queen) Validate(ctx context.Context) error {
 // DryRun returns a migration execution plan without applying migrations.
 // Direction can be DirectionUp (pending) or DirectionDown (applied).
 func (q *Queen) DryRun(ctx context.Context, direction string, limit int) ([]MigrationPlan, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	if q.driver == nil {
 		return nil, ErrNoDriver
 	}
@@ -391,6 +452,9 @@ func (q *Queen) DryRun(ctx context.Context, direction string, limit int) ([]Migr
 
 // Explain returns a detailed migration plan for a specific version.
 func (q *Queen) Explain(ctx context.Context, version string) (*MigrationPlan, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	if q.driver == nil {
 		return nil, ErrNoDriver
 	}
@@ -426,6 +490,9 @@ func (q *Queen) Explain(ctx context.Context, version string) (*MigrationPlan, er
 
 // Close releases database resources.
 func (q *Queen) Close() error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	if q.driver != nil {
 		return q.driver.Close()
 	}
@@ -434,14 +501,41 @@ func (q *Queen) Close() error {
 
 // Driver returns the underlying database driver.
 func (q *Queen) Driver() Driver {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
 	return q.driver
+}
+
+// DriverName returns the normalized database driver name used in diagnostics.
+func (q *Queen) DriverName() string {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
+	return q.getDriverName()
+}
+
+// SQLDB returns the underlying database handle when the driver exposes one.
+// It is primarily used by interactive diagnostics such as EXPLAIN.
+func (q *Queen) SQLDB() *sql.DB {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
+	if p, ok := q.driver.(SQLDBProvider); ok {
+		return p.SQLDB()
+	}
+	return nil
 }
 
 // FindMigration returns a registered migration by version, or nil if not found.
 func (q *Queen) FindMigration(version string) *Migration {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
 	for _, m := range q.migrations {
 		if m.Version == version {
-			return m
+			migration := *m
+			return &migration
 		}
 	}
 	return nil
@@ -460,8 +554,11 @@ func (q *Queen) lock(ctx context.Context) (func(), error) {
 	q.logger.InfoContext(ctx, "lock acquired", "table", q.config.TableName)
 
 	return func() {
-		_ = q.driver.Unlock(context.Background())
-		q.logger.InfoContext(context.Background(), "lock released", "table", q.config.TableName)
+		unlockCtx, cancel := context.WithTimeout(context.Background(), defaultUnlockTimeout)
+		defer cancel()
+
+		_ = q.driver.Unlock(unlockCtx)
+		q.logger.InfoContext(unlockCtx, "lock released", "table", q.config.TableName)
 	}, nil
 }
 
@@ -473,7 +570,6 @@ func (q *Queen) getDriverName() string {
 
 	driverType := fmt.Sprintf("%T", q.driver)
 
-	// Extract driver name from package path: "*postgres.Driver" -> "postgres"
 	if idx := strings.LastIndex(driverType, "."); idx != -1 {
 		if idx2 := strings.LastIndex(driverType[:idx], "/"); idx2 != -1 {
 			return driverType[idx2+1 : idx]
@@ -497,6 +593,28 @@ func (q *Queen) loadApplied(ctx context.Context) error {
 		q.applied[applied[i].Version] = &applied[i]
 	}
 
+	return nil
+}
+
+func (q *Queen) validateAppliedChecksumsLocked(ctx context.Context) error {
+	for _, m := range q.migrations {
+		applied, ok := q.applied[m.Version]
+		if !ok {
+			continue
+		}
+		actual := m.Checksum()
+		if applied.Checksum == actual || actual == noChecksumMarker {
+			continue
+		}
+
+		q.logger.ErrorContext(ctx, "checksum mismatch detected",
+			"version", m.Version,
+			"name", m.Name,
+			"expected_checksum", applied.Checksum,
+			"actual_checksum", actual)
+		return fmt.Errorf("%w: migration %s (expected %s, got %s)",
+			ErrChecksumMismatch, m.Version, applied.Checksum, actual)
+	}
 	return nil
 }
 
@@ -582,11 +700,36 @@ func (q *Queen) applyMigration(ctx context.Context, m *Migration) error {
 	}
 	q.logger.InfoContext(ctx, "migration started", logArgs...)
 
+	q.emitStart(m, tap.DirectionUp, start)
+
+	var txStartedAt time.Time
+	var meta *MigrationMetadata
+	txRecorder, hasTxRecorder := q.driver.(TransactionalRecorder)
 	err := q.driver.Exec(ctx, isolationLevel, func(tx *sql.Tx) error {
-		return m.executeUp(ctx, tx)
+		txStartedAt = time.Now()
+		q.emitTx(m, tap.DirectionUp, tap.KindTxBegin, txStartedAt, 0, nil)
+		if err := q.runUp(ctx, tx, m); err != nil {
+			return err
+		}
+		if hasTxRecorder {
+			meta = q.collectMetadata("apply", "success", time.Since(start).Milliseconds(), nil)
+			if err := txRecorder.RecordTx(ctx, tx, m, meta); err != nil {
+				return fmt.Errorf("record migration in transaction: %w", err)
+			}
+		}
+		return nil
 	})
+	if !txStartedAt.IsZero() {
+		txKind := tap.KindTxCommit
+		if err != nil {
+			txKind = tap.KindTxRollback
+		}
+		q.emitTx(m, tap.DirectionUp, txKind, txStartedAt, time.Since(txStartedAt), err)
+	}
 
 	durationMS := time.Since(start).Milliseconds()
+
+	q.emitEnd(m, tap.DirectionUp, start, time.Since(start), err)
 
 	if err != nil {
 		q.logger.ErrorContext(ctx, "migration failed",
@@ -599,16 +742,27 @@ func (q *Queen) applyMigration(ctx context.Context, m *Migration) error {
 		return err
 	}
 
-	meta := q.collectMetadata("apply", "success", durationMS, nil)
+	if !hasTxRecorder {
+		meta = q.collectMetadata("apply", "success", durationMS, nil)
+	}
+	if meta != nil {
+		meta.DurationMS = durationMS
+	}
 
-	if err := q.driver.Record(ctx, m, meta); err != nil {
-		q.logger.ErrorContext(ctx, "migration record failed",
-			"version", m.Version,
-			"name", m.Name,
-			"direction", DirectionUp,
-			"error", err,
-			"duration_ms", durationMS)
-		return err
+	if !hasTxRecorder {
+		if err := q.driver.Record(ctx, m, meta); err != nil {
+			q.logger.ErrorContext(ctx, "migration record failed",
+				"version", m.Version,
+				"name", m.Name,
+				"direction", DirectionUp,
+				"error", err,
+				"duration_ms", durationMS)
+			return err
+		}
+	}
+
+	if meta == nil {
+		meta = q.collectMetadata("apply", "success", durationMS, nil)
 	}
 
 	q.applied[m.Version] = &Applied{
@@ -648,11 +802,34 @@ func (q *Queen) rollbackMigration(ctx context.Context, m *Migration) error {
 	}
 	q.logger.InfoContext(ctx, "migration started", logArgs...)
 
+	q.emitStart(m, tap.DirectionDown, start)
+
+	var txStartedAt time.Time
+	txRecorder, hasTxRecorder := q.driver.(TransactionalRecorder)
 	err := q.driver.Exec(ctx, isolationLevel, func(tx *sql.Tx) error {
-		return m.executeDown(ctx, tx)
+		txStartedAt = time.Now()
+		q.emitTx(m, tap.DirectionDown, tap.KindTxBegin, txStartedAt, 0, nil)
+		if err := q.runDown(ctx, tx, m); err != nil {
+			return err
+		}
+		if hasTxRecorder {
+			if err := txRecorder.RemoveTx(ctx, tx, m.Version); err != nil {
+				return fmt.Errorf("remove migration in transaction: %w", err)
+			}
+		}
+		return nil
 	})
+	if !txStartedAt.IsZero() {
+		txKind := tap.KindTxCommit
+		if err != nil {
+			txKind = tap.KindTxRollback
+		}
+		q.emitTx(m, tap.DirectionDown, txKind, txStartedAt, time.Since(txStartedAt), err)
+	}
 
 	durationMS := time.Since(start).Milliseconds()
+
+	q.emitEnd(m, tap.DirectionDown, start, time.Since(start), err)
 
 	if err != nil {
 		meta := q.collectMetadata("rollback", "failed", durationMS, err)
@@ -668,14 +845,16 @@ func (q *Queen) rollbackMigration(ctx context.Context, m *Migration) error {
 		return err
 	}
 
-	if err := q.driver.Remove(ctx, m.Version); err != nil {
-		q.logger.ErrorContext(ctx, "migration remove failed",
-			"version", m.Version,
-			"name", m.Name,
-			"direction", DirectionDown,
-			"error", err,
-			"duration_ms", durationMS)
-		return err
+	if !hasTxRecorder {
+		if err := q.driver.Remove(ctx, m.Version); err != nil {
+			q.logger.ErrorContext(ctx, "migration remove failed",
+				"version", m.Version,
+				"name", m.Name,
+				"direction", DirectionDown,
+				"error", err,
+				"duration_ms", durationMS)
+			return err
+		}
 	}
 
 	delete(q.applied, m.Version)

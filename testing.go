@@ -134,5 +134,5 @@ func (th *TestHelper) TestRollback() {
 		th.t.Fatalf("Failed to reapply migrations (database not clean after rollback): %v", err)
 	}
 
-	th.t.Logf("✓ Successfully completed full migration cycle: Up(%d) → Down(%d) → Up(%d)", count, count, count)
+	th.t.Logf("✓ Successfully completed full migration cycle: Up(%d) -> Down(%d) -> Up(%d)", count, count, count)
 }

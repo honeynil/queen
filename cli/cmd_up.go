@@ -3,25 +3,36 @@ package cli
 import (
 	"context"
 	"fmt"
+	"time"
 
-	"github.com/honeynil/queen"
 	"github.com/spf13/cobra"
+	"github.com/yaop-labs/queen"
+	"github.com/yaop-labs/queen/cli/tui/live"
+	"github.com/yaop-labs/queen/tap"
 )
 
 func (app *App) upCmd() *cobra.Command {
 	var (
-		steps int
-		to    string
+		steps              int
+		to                 string
+		tapTUI             bool
+		tapSlowThreshold   time.Duration
+		tapNPlus1Threshold int
 	)
 
 	cmd := &cobra.Command{
 		Use:   "up",
 		Short: "Apply pending migrations",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := context.Background()
-
 			if steps > 0 && to != "" {
 				return fmt.Errorf("cannot use both --steps and --to")
+			}
+
+			if tapTUI {
+				cfg := tap.DefaultAnalyzerConfig()
+				cfg.SlowThreshold = tapSlowThreshold
+				cfg.NPlus1Threshold = tapNPlus1Threshold
+				return runUpWithTap(commandContext(cmd), app, steps, to, cfg)
 			}
 
 			operation := "apply migrations"
@@ -34,86 +45,50 @@ func (app *App) upCmd() *cobra.Command {
 				return err
 			}
 
-			q, err := app.setupQueen(ctx)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = q.Close() }()
-
-			if to != "" {
-				return migrateUpToVersion(ctx, q, to, app.config.Yes)
-			}
-
-			if steps > 0 {
-				if err := q.UpSteps(ctx, steps); err != nil {
-					return fmt.Errorf("failed to apply migrations: %w", err)
+			return app.runWithQueen(cmd, func(ctx context.Context, q *queen.Queen) error {
+				if to != "" {
+					return migrateUpToVersion(ctx, q, to, app.config.Yes)
 				}
-				fmt.Printf("Applied %d migration(s)\n", steps)
-			} else {
-				if err := q.Up(ctx); err != nil {
-					return fmt.Errorf("failed to apply migrations: %w", err)
-				}
-				fmt.Println("All migrations applied successfully")
-			}
 
-			return nil
+				if steps > 0 {
+					if err := q.UpSteps(ctx, steps); err != nil {
+						return fmt.Errorf("failed to apply migrations: %w", err)
+					}
+					fmt.Printf("Applied %d migration(s)\n", steps)
+				} else {
+					if err := q.Up(ctx); err != nil {
+						return fmt.Errorf("failed to apply migrations: %w", err)
+					}
+					fmt.Println("All migrations applied successfully")
+				}
+
+				return nil
+			})
 		},
 	}
 
 	cmd.Flags().IntVar(&steps, "steps", 0, "Number of migrations to apply (0 = all)")
 	cmd.Flags().StringVar(&to, "to", "", "Migrate up to specific version")
+	cmd.Flags().BoolVar(&tapTUI, "tap", false, "Launch live tap TUI alongside migration execution")
+	cmd.Flags().DurationVar(&tapSlowThreshold, "tap-slow-threshold", 100*time.Millisecond, "Slow query threshold for --tap (0 disables)")
+	cmd.Flags().IntVar(&tapNPlus1Threshold, "tap-nplus1-threshold", 5, "Repeated SELECT threshold for --tap N+1 detection (0 disables)")
 
 	return cmd
 }
 
-func migrateUpToVersion(ctx context.Context, q *queen.Queen, targetVersion string, autoYes bool) error {
-	statuses, err := q.Status(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get migration status: %w", err)
-	}
-
-	targetIndex := -1
-	for i, s := range statuses {
-		if s.Version == targetVersion {
-			targetIndex = i
-			break
-		}
-	}
-
-	if targetIndex == -1 {
-		return fmt.Errorf("migration version not found: %s", targetVersion)
-	}
-
-	stepsToApply := 0
-	for i := 0; i <= targetIndex; i++ {
-		if statuses[i].Status == queen.StatusPending {
-			stepsToApply++
-		}
-	}
-
-	if stepsToApply == 0 {
-		fmt.Println("Already at or past the target version")
-		return nil
-	}
-
-	if !autoYes {
-		fmt.Printf("Will apply %d migration(s) to reach version %s:\n", stepsToApply, targetVersion)
-		for i := 0; i <= targetIndex; i++ {
-			if statuses[i].Status == queen.StatusPending {
-				fmt.Printf("  ↑ %s - %s\n", statuses[i].Version, statuses[i].Name)
+// runUpWithTap runs Up under a live tap TUI. The TUI consumes events from
+// a ChannelSink while migrations execute on a background goroutine.
+func runUpWithTap(ctx context.Context, app *App, steps int, to string, cfg tap.AnalyzerConfig) error {
+	return live.Run(ctx, func(runCtx context.Context, sink tap.Sink) error {
+		tapOpt := queen.WithTap(tap.NewAnalyzerSink(sink, cfg))
+		return app.runWithQueenContext(runCtx, []queen.Option{tapOpt}, func(ctx context.Context, q *queen.Queen) error {
+			if to != "" {
+				return migrateUpToVersion(ctx, q, to, true)
 			}
-		}
-		fmt.Println()
-
-		if !confirm("Proceed with migration?") {
-			return fmt.Errorf("canceled by user")
-		}
-	}
-
-	if err := q.UpSteps(ctx, stepsToApply); err != nil {
-		return fmt.Errorf("failed to apply migrations: %w", err)
-	}
-
-	fmt.Printf("Successfully migrated to version %s\n", targetVersion)
-	return nil
+			if steps > 0 {
+				return q.UpSteps(ctx, steps)
+			}
+			return q.Up(ctx)
+		})
+	})
 }

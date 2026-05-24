@@ -1,10 +1,11 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/honeynil/queen"
+	"github.com/yaop-labs/queen"
 )
 
 func TestCountStatuses(t *testing.T) {
@@ -33,8 +34,6 @@ func TestCountStatuses(t *testing.T) {
 }
 
 func TestOutputStatusTable(t *testing.T) {
-	t.Parallel()
-
 	app := &App{config: &Config{}}
 	now := time.Now()
 
@@ -56,9 +55,21 @@ func TestOutputStatusTable(t *testing.T) {
 		},
 	}
 
-	err := app.outputStatusTable(statuses)
+	var err error
+	out := captureStdout(t, func() {
+		err = app.outputStatusTable(statuses)
+	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "Summary: 2 total, 1 applied, 1 pending") {
+		t.Fatalf("output summary mismatch:\n%s", out)
+	}
+	if strings.Contains(out, "WARNING: WARNING") {
+		t.Fatalf("output contains duplicated warning prefix:\n%s", out)
+	}
+	if strings.Contains(out, "statusApplied") || strings.Contains(out, "statusPending") {
+		t.Fatalf("output leaked internal status names:\n%s", out)
 	}
 }
 

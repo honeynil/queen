@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/honeynil/queen"
-	"github.com/honeynil/queen/drivers/base"
+	"github.com/yaop-labs/queen"
+	"github.com/yaop-labs/queen/drivers/base"
 )
 
 // Driver implements the queen.Driver interface for MySQL.

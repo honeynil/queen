@@ -4,14 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/honeynil/queen"
-	"github.com/honeynil/queen/drivers/base"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/yaop-labs/queen"
+	"github.com/yaop-labs/queen/drivers/base"
 )
 
 const CockroachTestDSN = "postgresql://root@localhost:26257/defaultdb?sslmode=disable"
@@ -176,7 +177,7 @@ func TestLockUnit(t *testing.T) {
 		// First iteration of retry loop:
 		// Cleanup query - should succeed even if no rows
 		mock.ExpectExec(`DELETE FROM "queen_migrations_lock" WHERE lock_key = \$1 AND expires_at < now\(\)`).
-			WithArgs("migration_lock", sqlmock.AnyArg()).
+			WithArgs("migration_lock").
 			WillReturnResult(sqlmock.NewResult(0, 0))
 
 		// Check if lock exists - should return no rows
@@ -216,7 +217,7 @@ func TestLockUnit(t *testing.T) {
 		// Will retry multiple times with 1ms timeout, so we need multiple expectations
 		for i := 0; i < 5; i++ {
 			mock.ExpectExec(`DELETE FROM "queen_migrations_lock" WHERE lock_key = \$1 AND expires_at < now\(\)`).
-				WithArgs("migration_lock", sqlmock.AnyArg()).
+				WithArgs("migration_lock").
 				WillReturnResult(sqlmock.NewResult(0, 0))
 
 			mock.ExpectQuery(`SELECT 1 FROM "queen_migrations_lock" WHERE lock_key = \$1 AND expires_at >= now\(\) LIMIT 1`).
@@ -228,6 +229,41 @@ func TestLockUnit(t *testing.T) {
 		err = driver.Lock(ctx, 1*time.Millisecond)
 		if !errors.Is(err, queen.ErrLockTimeout) {
 			t.Errorf("Lock() error = %v; want ErrLockTimeout", err)
+		}
+	})
+
+	t.Run("treats wrapped sql.ErrNoRows as no existing lock", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver, err := New(db)
+		if err != nil {
+			t.Fatalf("New() failed: %v", err)
+		}
+
+		ctx := context.Background()
+
+		mock.ExpectExec(`DELETE FROM "queen_migrations_lock" WHERE lock_key = \$1 AND expires_at < now\(\)`).
+			WithArgs("migration_lock").
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		mock.ExpectQuery(`SELECT 1 FROM "queen_migrations_lock" WHERE lock_key = \$1 AND expires_at >= now\(\) LIMIT 1`).
+			WithArgs("migration_lock").
+			WillReturnError(fmt.Errorf("wrapped no rows: %w", sql.ErrNoRows))
+
+		mock.ExpectExec(`INSERT INTO "queen_migrations_lock" \(lock_key, expires_at, owner_id\) VALUES \(\$1, \$2, \$3\)`).
+			WithArgs("migration_lock", sqlmock.AnyArg(), driver.ownerID).
+			WillReturnResult(sqlmock.NewResult(1, 1))
+
+		if err := driver.Lock(ctx, 5*time.Second); err != nil {
+			t.Errorf("Lock() failed: %v", err)
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
 		}
 	})
 }
@@ -399,7 +435,7 @@ func TestLockAndUnlockSequence(t *testing.T) {
 		ctx := context.Background()
 
 		mock.ExpectExec(`DELETE FROM "custom_migrations_lock" WHERE lock_key = \$1 AND expires_at < now\(\)`).
-			WithArgs("migration_lock", sqlmock.AnyArg()).
+			WithArgs("migration_lock").
 			WillReturnResult(sqlmock.NewResult(0, 0))
 
 		mock.ExpectQuery(`SELECT 1 FROM "custom_migrations_lock" WHERE lock_key = \$1 AND expires_at >= now\(\) LIMIT 1`).

@@ -4,9 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"strings"
-	"sync"
 
-	"github.com/honeynil/queen/internal/checksum"
+	"github.com/yaop-labs/queen/internal/checksum"
 )
 
 type MigrationFunc func(ctx context.Context, tx *sql.Tx) error
@@ -21,9 +20,6 @@ type Migration struct {
 	DownFunc       MigrationFunc
 	ManualChecksum string
 	IsolationLevel sql.IsolationLevel
-
-	checksumOnce *sync.Once
-	checksum     string
 }
 
 type M = Migration
@@ -51,25 +47,15 @@ func (m *Migration) Validate() error {
 const noChecksumMarker = "no-checksum-go-func"
 
 func (m *Migration) Checksum() string {
-	if m.checksumOnce == nil {
-		m.checksumOnce = &sync.Once{}
+	if m.ManualChecksum != "" {
+		return m.ManualChecksum
 	}
 
-	m.checksumOnce.Do(func() {
-		if m.ManualChecksum != "" {
-			m.checksum = m.ManualChecksum
-			return
-		}
+	if m.UpSQL != "" || m.DownSQL != "" {
+		return checksum.Calculate(m.UpSQL, m.DownSQL)
+	}
 
-		if m.UpSQL != "" || m.DownSQL != "" {
-			m.checksum = checksum.Calculate(m.UpSQL, m.DownSQL)
-			return
-		}
-
-		m.checksum = noChecksumMarker
-	})
-
-	return m.checksum
+	return noChecksumMarker
 }
 
 func (m *Migration) HasRollback() bool {
@@ -97,30 +83,4 @@ func (m *Migration) IsDestructive() bool {
 	}
 
 	return false
-}
-
-func (m *Migration) executeUp(ctx context.Context, tx *sql.Tx) error {
-	if m.UpFunc != nil {
-		return m.UpFunc(ctx, tx)
-	}
-
-	if m.UpSQL != "" {
-		_, err := tx.ExecContext(ctx, m.UpSQL)
-		return err
-	}
-
-	return ErrInvalidMigration
-}
-
-func (m *Migration) executeDown(ctx context.Context, tx *sql.Tx) error {
-	if m.DownFunc != nil {
-		return m.DownFunc(ctx, tx)
-	}
-
-	if m.DownSQL != "" {
-		_, err := tx.ExecContext(ctx, m.DownSQL)
-		return err
-	}
-
-	return ErrInvalidMigration
 }
