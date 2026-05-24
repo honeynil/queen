@@ -5,8 +5,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/honeynil/queen"
 	"github.com/spf13/cobra"
+	"github.com/yaop-labs/queen"
 )
 
 func (app *App) createCmd() *cobra.Command {
@@ -34,7 +34,7 @@ func (app *App) createCmd() *cobra.Command {
 				return err
 			}
 
-			filename := fmt.Sprintf("migrations/%s_%s.go", nextVersion, name)
+			filename := migrationFilename(nextVersion, name)
 			variableName := migrationVariableName(nextVersion, name)
 
 			var content string
@@ -97,7 +97,7 @@ func (app *App) findNextVersion() (string, error) {
 			}
 			return fmt.Sprintf("%0*d", padding, 1), nil
 		case queen.NamingPatternSemver:
-			return "", fmt.Errorf("semver pattern requires manual version specification, use --version flag")
+			return "", fmt.Errorf("semver pattern requires a manual version; create does not support semver auto-versioning yet")
 		default:
 			return "", fmt.Errorf("unknown naming pattern: %s", namingConfig.Pattern)
 		}
@@ -136,93 +136,4 @@ func (app *App) getExistingVersions() ([]string, error) {
 	}
 
 	return versions, nil
-}
-
-func migrationVariableName(version, name string) string {
-	return fmt.Sprintf("Migration%s%s", version, toPascalCase(name))
-}
-
-func generateSQLTemplate(version, name, variableName string) string {
-	description := strings.ReplaceAll(name, "_", " ")
-
-	return fmt.Sprintf(`package migrations
-
-import "github.com/honeynil/queen"
-
-// %s %s
-var %s = queen.M{
-	Version: "%s",
-	Name:    "%s",
-	UpSQL: `+"`"+`
-		-- Write your migration here
-		-- Example: CREATE TABLE users (id INT PRIMARY KEY, email VARCHAR(255));
-	`+"`"+`,
-	DownSQL: `+"`"+`
-		-- Write your rollback here
-		-- Example: DROP TABLE users;
-	`+"`"+`,
-}
-`, variableName, description, variableName, version, name)
-}
-
-func generateGoTemplate(version, name, variableName string) string {
-	description := strings.ReplaceAll(name, "_", " ")
-	upFuncName := fmt.Sprintf("up%s%s", version, toPascalCase(name))
-	downFuncName := fmt.Sprintf("down%s%s", version, toPascalCase(name))
-
-	return fmt.Sprintf(`package migrations
-
-import (
-	"context"
-	"database/sql"
-
-	"github.com/honeynil/queen"
-)
-
-// %s %s
-var %s = queen.M{
-	Version:        "%s",
-	Name:           "%s",
-	ManualChecksum: "v1", // Update this when you change the function
-	UpFunc:         %s,
-	DownFunc:       %s,
-}
-
-func %s(ctx context.Context, tx *sql.Tx) error {
-	// TODO: Implement your migration logic
-	// Example:
-	// rows, err := tx.QueryContext(ctx, "SELECT id, name FROM users")
-	// if err != nil {
-	//     return err
-	// }
-	// defer rows.Close()
-	//
-	// for rows.Next() {
-	//     var id int
-	//     var name string
-	//     if err := rows.Scan(&id, &name); err != nil {
-	//         return err
-	//     }
-	//     // Process data...
-	// }
-	//
-	// return rows.Err()
-	return nil
-}
-
-func %s(ctx context.Context, tx *sql.Tx) error {
-	// TODO: Implement your rollback logic
-	return nil
-}
-`, variableName, description, variableName, version, name, upFuncName, downFuncName, upFuncName, downFuncName)
-}
-
-func toPascalCase(s string) string {
-	parts := strings.Split(s, "_")
-	for i, part := range parts {
-		if len(part) > 0 {
-			parts[i] = strings.ToUpper(part[:1]) + part[1:]
-		}
-	}
-	return strings.Join(parts, "")
 }

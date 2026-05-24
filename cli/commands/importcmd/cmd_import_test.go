@@ -1,4 +1,4 @@
-package cli
+package importcmd
 
 import (
 	"os"
@@ -115,7 +115,7 @@ func TestGenerateQueenMigrationFile(t *testing.T) {
 		contain string
 	}{
 		{"package declaration", "package migrations"},
-		{"queen import", `"github.com/honeynil/queen"`},
+		{"queen import", `"github.com/yaop-labs/queen"`},
 		{"function name", "func Register001create_users(q *queen.Queen)"},
 		{"version", `Version: "001"`},
 		{"name", `Name:    "create_users"`},
@@ -153,7 +153,7 @@ func TestGenerateRegistrationFile(t *testing.T) {
 
 	checks := []string{
 		"package migrations",
-		`"github.com/honeynil/queen"`,
+		`"github.com/yaop-labs/queen"`,
 		"func Register(q *queen.Queen)",
 		"Register001create_users(q)",
 		"Register002add_posts(q)",
@@ -286,6 +286,114 @@ DROP TABLE test;`
 
 	if _, err := os.Stat(outputDir); !os.IsNotExist(err) {
 		t.Error("dry-run should not create output directory")
+	}
+}
+
+func TestImportFromGoose_PreservesGooseVersion(t *testing.T) {
+	t.Parallel()
+
+	sourceDir := t.TempDir()
+	outputDir := filepath.Join(t.TempDir(), "queen_migrations")
+
+	content := `-- +goose Up
+CREATE TABLE events (id INT);
+-- +goose Down
+DROP TABLE events;`
+	if err := os.WriteFile(filepath.Join(sourceDir, "20240524054622_create_events.sql"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := importFromGoose(sourceDir, outputDir, false); err != nil {
+		t.Fatalf("importFromGoose() error = %v", err)
+	}
+
+	generated := filepath.Join(outputDir, "20240524054622_create_events.go")
+	body, err := os.ReadFile(generated)
+	if err != nil {
+		t.Fatalf("read generated migration: %v", err)
+	}
+	if !strings.Contains(string(body), `Version: "20240524054622"`) {
+		t.Fatalf("generated migration did not preserve goose version:\n%s", body)
+	}
+}
+
+func TestImportFromGoose_DoesNotOverwriteExistingMigration(t *testing.T) {
+	t.Parallel()
+
+	sourceDir := t.TempDir()
+	outputDir := filepath.Join(t.TempDir(), "queen_migrations")
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	existingPath := filepath.Join(outputDir, "001_test.go")
+	existingContent := []byte("package migrations\n\n// keep me\n")
+	if err := os.WriteFile(existingPath, existingContent, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	content := `-- +goose Up
+CREATE TABLE test (id INT);
+-- +goose Down
+DROP TABLE test;`
+	if err := os.WriteFile(filepath.Join(sourceDir, "001_test.sql"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := importFromGoose(sourceDir, outputDir, false)
+	if err == nil {
+		t.Fatal("expected import to fail when output file already exists")
+	}
+	if !strings.Contains(err.Error(), "file already exists") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got, readErr := os.ReadFile(existingPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != string(existingContent) {
+		t.Fatalf("existing migration was overwritten:\n%s", got)
+	}
+}
+
+func TestImportFromGoose_DoesNotOverwriteRegistrationFile(t *testing.T) {
+	t.Parallel()
+
+	sourceDir := t.TempDir()
+	outputDir := filepath.Join(t.TempDir(), "queen_migrations")
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	existingPath := filepath.Join(outputDir, "migrations.go")
+	existingContent := []byte("package migrations\n\nfunc Register() {}\n")
+	if err := os.WriteFile(existingPath, existingContent, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	content := `-- +goose Up
+CREATE TABLE test (id INT);
+-- +goose Down
+DROP TABLE test;`
+	if err := os.WriteFile(filepath.Join(sourceDir, "001_test.sql"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := importFromGoose(sourceDir, outputDir, false)
+	if err == nil {
+		t.Fatal("expected import to fail when migrations.go already exists")
+	}
+	if !strings.Contains(err.Error(), "file already exists") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got, readErr := os.ReadFile(existingPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != string(existingContent) {
+		t.Fatalf("existing registration file was overwritten:\n%s", got)
 	}
 }
 

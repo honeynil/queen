@@ -1,0 +1,8 @@
+# .queenignore - ignored migration gaps
+# Format: version # reason
+#
+# Copy to .queenignore only when a gap is intentional.
+# Usually this is for numbering gaps from removed or abandoned migrations.
+
+003 # removed before the first production release
+20240524054622 # legacy goose migration intentionally skipped

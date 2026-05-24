@@ -1,0 +1,31 @@
+# Queen CLI configuration example.
+#
+# Copy to .queen.yaml in an application repository when you want to use
+# `--use-config --env <name>` instead of passing --driver/--dsn each time.
+
+config_locked: false
+
+naming:
+  pattern: sequential-padded
+  padding: 3
+  enforce: true
+
+development:
+  driver: postgres
+  dsn: "postgres://localhost/myapp?sslmode=disable"
+  table: queen_migrations
+  lock_timeout: 5m
+
+test:
+  driver: sqlite
+  dsn: "./test.db?_journal_mode=WAL"
+  table: queen_migrations
+  lock_timeout: 1m
+
+production:
+  driver: postgres
+  dsn: "${DATABASE_URL}"
+  table: queen_migrations
+  lock_timeout: 30m
+  require_confirmation: true
+  require_explicit_unlock: true
