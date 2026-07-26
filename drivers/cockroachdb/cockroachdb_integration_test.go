@@ -218,13 +218,16 @@ func TestCockroachDBIntegration_TransactionRollback(t *testing.T) {
 
 	q.MustAdd(helpers.TestMigration001)
 
+	// Force RecordTx to fail without dropping the metadata table: CockroachDB
+	// does not guarantee atomic DROP TABLE in a multi-statement transaction.
 	q.MustAdd(queen.M{
 		Version: "002",
 		Name:    "record_failure_rolls_back_body",
 		UpSQL: `
-			DROP TABLE queen_migrations;
 			CREATE TABLE test_table (id INT PRIMARY KEY);
 			INSERT INTO test_table VALUES (1);
+			INSERT INTO queen_migrations (version, name, checksum)
+			VALUES ('002', 'force_record_collision', 'test');
 		`,
 		DownSQL: `DROP TABLE IF EXISTS test_table`,
 	})
@@ -241,6 +244,17 @@ func TestCockroachDBIntegration_TransactionRollback(t *testing.T) {
 
 	if helpers.TableExists(t, db, "test_table") {
 		t.Error("migration body should roll back when its record cannot be written")
+	}
+
+	var failedRecordCount int
+	if err := db.QueryRowContext(ctx,
+		"SELECT count(*) FROM queen_migrations WHERE version = $1",
+		"002",
+	).Scan(&failedRecordCount); err != nil {
+		t.Fatalf("failed to check rolled-back migration record: %v", err)
+	}
+	if failedRecordCount != 0 {
+		t.Errorf("expected failed migration record to roll back, got %d rows", failedRecordCount)
 	}
 
 	statuses, err := q.Status(ctx)
