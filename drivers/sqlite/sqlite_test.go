@@ -282,43 +282,38 @@ func TestRemove(t *testing.T) {
 }
 
 func TestLocking(t *testing.T) {
-	db, cleanup := setupTestDBFile(t)
-	defer cleanup()
+	db1, cleanup1 := setupTestDBFile(t)
+	defer cleanup1()
+	db2, cleanup2 := setupTestDBFile(t)
+	defer cleanup2()
 
-	driver := New(db)
+	driver1 := New(db1)
+	driver2 := New(db2)
 	ctx := context.Background()
 
-	if err := driver.Init(ctx); err != nil {
+	if err := driver1.Init(ctx); err != nil {
 		t.Fatalf("Init() failed: %v", err)
 	}
 
-	err := driver.Lock(ctx, 5*time.Second)
-	if err != nil {
+	if err := driver1.Lock(ctx, 5*time.Second); err != nil {
 		t.Fatalf("Lock() failed: %v", err)
 	}
+	defer func() { _ = driver1.Unlock(ctx) }()
 
-	var lockingMode string
-	err = db.QueryRowContext(ctx, "PRAGMA locking_mode").Scan(&lockingMode)
-	if err != nil {
-		t.Fatalf("failed to query locking mode: %v", err)
-	}
-	if lockingMode != "exclusive" {
-		t.Errorf("locking_mode = %q; want %q", lockingMode, "exclusive")
+	if err := driver2.Lock(ctx, 10*time.Millisecond); !errors.Is(err, queen.ErrLockTimeout) {
+		t.Fatalf("second Lock() error = %v; want ErrLockTimeout", err)
 	}
 
-	if err := driver.Unlock(ctx); err != nil {
+	if err := driver1.Unlock(ctx); err != nil {
 		t.Fatalf("Unlock() failed: %v", err)
 	}
 
-	err = db.QueryRowContext(ctx, "PRAGMA locking_mode").Scan(&lockingMode)
-	if err != nil {
-		t.Fatalf("failed to query locking mode: %v", err)
+	if err := driver2.Lock(ctx, time.Second); err != nil {
+		t.Fatalf("second driver failed to acquire released lock: %v", err)
 	}
-	if lockingMode != "normal" {
-		t.Errorf("locking_mode = %q; want %q after unlock", lockingMode, "normal")
-	}
+	defer func() { _ = driver2.Unlock(ctx) }()
 
-	if err := driver.Unlock(ctx); err != nil {
+	if err := driver2.Unlock(ctx); err != nil {
 		t.Errorf("double Unlock() should be safe, got error: %v", err)
 	}
 }
@@ -541,106 +536,45 @@ func TestTimestampParsing(t *testing.T) {
 }
 
 func TestLockUnit(t *testing.T) {
-	t.Parallel()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock: %v", err)
+	}
+	defer func() { _ = db.Close() }()
 
-	t.Run("handles busy_timeout error", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("failed to create mock: %v", err)
-		}
-		defer func() { _ = db.Close() }()
+	driver := NewWithTableName(db, t.Name())
+	ctx := context.Background()
 
-		driver := New(db)
-		ctx := context.Background()
+	if err := driver.Lock(ctx, time.Second); err != nil {
+		t.Fatalf("first Lock() failed: %v", err)
+	}
+	defer func() { _ = driver.Unlock(ctx) }()
 
-		timeoutErr := errors.New("pragma busy_timeout failed")
-		mock.ExpectExec("PRAGMA busy_timeout").WillReturnError(timeoutErr)
-
-		err = driver.Lock(ctx, 5*time.Second)
-		if err == nil {
-			t.Error("Lock() should return error when PRAGMA busy_timeout fails")
-		}
-
-		if err := mock.ExpectationsWereMet(); err != nil {
-			t.Errorf("unfulfilled expectations: %v", err)
-		}
-	})
-
-	t.Run("handles locking_mode error", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("failed to create mock: %v", err)
-		}
-		defer func() { _ = db.Close() }()
-
-		driver := New(db)
-		ctx := context.Background()
-
-		mock.ExpectExec("PRAGMA busy_timeout").WillReturnResult(sqlmock.NewResult(0, 0))
-
-		lockErr := errors.New("pragma locking_mode failed")
-		mock.ExpectExec("PRAGMA locking_mode = EXCLUSIVE").WillReturnError(lockErr)
-
-		err = driver.Lock(ctx, 5*time.Second)
-		if err == nil {
-			t.Error("Lock() should return error when PRAGMA locking_mode fails")
-		}
-
-		if err := mock.ExpectationsWereMet(); err != nil {
-			t.Errorf("unfulfilled expectations: %v", err)
-		}
-	})
+	if err := driver.Lock(ctx, time.Second); !errors.Is(err, queen.ErrLockTimeout) {
+		t.Fatalf("nested Lock() error = %v; want ErrLockTimeout", err)
+	}
 }
 
 func TestUnlockUnit(t *testing.T) {
-	t.Parallel()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock: %v", err)
+	}
+	defer func() { _ = db.Close() }()
 
-	t.Run("handles unlock PRAGMA error", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("failed to create mock: %v", err)
-		}
-		defer func() { _ = db.Close() }()
+	driver := NewWithTableName(db, t.Name())
+	ctx := context.Background()
 
-		driver := New(db)
-		ctx := context.Background()
-
-		unlockErr := errors.New("pragma normal failed")
-		mock.ExpectExec("PRAGMA locking_mode = NORMAL").WillReturnError(unlockErr)
-
-		err = driver.Unlock(ctx)
-		if err == nil {
-			t.Error("Unlock() should return error when PRAGMA fails")
-		}
-
-		if err := mock.ExpectationsWereMet(); err != nil {
-			t.Errorf("unfulfilled expectations: %v", err)
-		}
-	})
-
-	t.Run("handles unlock transaction error", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("failed to create mock: %v", err)
-		}
-		defer func() { _ = db.Close() }()
-
-		driver := New(db)
-		ctx := context.Background()
-
-		mock.ExpectExec("PRAGMA locking_mode = NORMAL").
-			WillReturnResult(sqlmock.NewResult(0, 0))
-
-		txErr := errors.New("begin tx failed")
-		mock.ExpectBegin().WillReturnError(txErr)
-
-		err = driver.Unlock(ctx)
-		if err == nil {
-			t.Error("Unlock() should return error when BeginTx fails")
-		}
-
-		if err := mock.ExpectationsWereMet(); err != nil {
-			t.Errorf("unfulfilled expectations: %v", err)
-		}
-	})
+	if err := driver.Unlock(ctx); err != nil {
+		t.Fatalf("Unlock() without Lock() failed: %v", err)
+	}
+	if err := driver.Lock(ctx, time.Second); err != nil {
+		t.Fatalf("Lock() failed: %v", err)
+	}
+	if err := driver.Unlock(ctx); err != nil {
+		t.Fatalf("Unlock() failed: %v", err)
+	}
+	if err := driver.Unlock(ctx); err != nil {
+		t.Fatalf("second Unlock() failed: %v", err)
+	}
 }

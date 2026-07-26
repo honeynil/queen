@@ -176,6 +176,52 @@ func TestInit(t *testing.T) {
 			t.Errorf("unfulfilled expectations: %v", err)
 		}
 	})
+
+	t.Run("returns column inspection errors", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		mock.ExpectExec(regexp.QuoteMeta("CREATE TABLE IF NOT EXISTS `queen_migrations`")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		checkErr := errors.New("information schema failed")
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS")).
+			WillReturnError(checkErr)
+
+		if err := driver.Init(ctx); !errors.Is(err, checkErr) {
+			t.Fatalf("Init() error = %v; want %v", err, checkErr)
+		}
+	})
+
+	t.Run("returns ALTER TABLE errors", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		mock.ExpectExec(regexp.QuoteMeta("CREATE TABLE IF NOT EXISTS `queen_migrations`")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS")).
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+
+		alterErr := errors.New("alter failed")
+		mock.ExpectExec(regexp.QuoteMeta("ALTER TABLE `queen_migrations` ADD COLUMN")).
+			WillReturnError(alterErr)
+
+		if err := driver.Init(ctx); !errors.Is(err, alterErr) {
+			t.Fatalf("Init() error = %v; want %v", err, alterErr)
+		}
+	})
 }
 
 func TestLock(t *testing.T) {
@@ -274,6 +320,36 @@ func TestLock(t *testing.T) {
 			t.Error("Lock() should return error when GET_LOCK fails")
 		}
 	})
+
+	t.Run("rejects nested lock without replacing connection", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+			WithArgs("queen_lock_queen_migrations", int64(5)).
+			WillReturnRows(sqlmock.NewRows([]string{"result"}).AddRow(1))
+
+		if err := driver.Lock(ctx, 5*time.Second); err != nil {
+			t.Fatalf("first Lock() failed: %v", err)
+		}
+		if err := driver.Lock(ctx, 5*time.Second); !errors.Is(err, queen.ErrLockTimeout) {
+			t.Fatalf("second Lock() error = %v; want ErrLockTimeout", err)
+		}
+
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+			WithArgs("queen_lock_queen_migrations").
+			WillReturnRows(sqlmock.NewRows([]string{"result"}).AddRow(1))
+
+		if err := driver.Unlock(ctx); err != nil {
+			t.Fatalf("Unlock() failed: %v", err)
+		}
+	})
 }
 
 func TestUnlock(t *testing.T) {
@@ -360,9 +436,39 @@ func TestUnlock(t *testing.T) {
 		if err == nil {
 			t.Error("Unlock() should return error when RELEASE_LOCK fails")
 		}
+		if driver.conn != nil {
+			t.Error("conn should be cleared after failed RELEASE_LOCK")
+		}
 
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+
+	t.Run("rejects non-owner release result and clears connection", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+			WillReturnRows(sqlmock.NewRows([]string{"result"}).AddRow(1))
+		if err := driver.Lock(ctx, time.Second); err != nil {
+			t.Fatalf("Lock() failed: %v", err)
+		}
+
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+			WillReturnRows(sqlmock.NewRows([]string{"result"}).AddRow(0))
+
+		if err := driver.Unlock(ctx); err == nil {
+			t.Fatal("Unlock() should fail when session does not own lock")
+		}
+		if driver.conn != nil {
+			t.Error("conn should be cleared after non-owner release result")
 		}
 	})
 }

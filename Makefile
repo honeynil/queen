@@ -1,5 +1,6 @@
-.PHONY: test test-unit test-integration test-postgres test-mysql test-sqlite test-all help coverage \
-	lint fmt fmt-fix vet tools bench ci ci-quick clean check-docker
+.PHONY: test test-unit test-integration test-postgres test-mysql test-sqlite test-cockroachdb \
+	test-clickhouse test-mssql test-all help coverage coverage-integration lint fmt fmt-fix vet \
+	tools bench ci ci-quick clean check-docker install-deps
 
 PODMAN_SOCKET := $(shell if [ -S /run/user/$(shell id -u)/podman/podman.sock ]; then echo "unix:///run/user/$(shell id -u)/podman/podman.sock"; fi)
 ifneq ($(PODMAN_SOCKET),)
@@ -20,6 +21,9 @@ help:
 	@echo "  make test-postgres     - Run Postgres integration tests"
 	@echo "  make test-mysql        - Run MySQL integration tests"
 	@echo "  make test-sqlite       - Run SQLite integration tests"
+	@echo "  make test-cockroachdb  - Run CockroachDB integration tests"
+	@echo "  make test-clickhouse   - Run ClickHouse integration tests"
+	@echo "  make test-mssql        - Run MSSQL integration tests"
 	@echo "  make test-all          - Run both unit and integration tests"
 	@echo "  make coverage          - Generate test coverage report"
 	@echo "  make lint              - Run golangci-lint"

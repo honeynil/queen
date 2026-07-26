@@ -5,6 +5,7 @@ package mysql_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -96,6 +97,34 @@ func TestMySQLIntegration_BasicMigration(t *testing.T) {
 
 	if !helpers.TableExists(t, db, "users") {
 		t.Error("users table should exist after migration")
+	}
+
+	var action, status, checksum string
+	err = db.QueryRowContext(ctx,
+		"SELECT action, status, checksum FROM queen_migrations WHERE version = ?",
+		"001",
+	).Scan(&action, &status, &checksum)
+	if err != nil {
+		t.Fatalf("failed to read migration metadata: %v", err)
+	}
+	if action != "apply" || status != "success" {
+		t.Fatalf("migration metadata = action %q, status %q; want apply/success", action, status)
+	}
+
+	if _, err := db.ExecContext(ctx,
+		"UPDATE queen_migrations SET checksum = ? WHERE version = ?",
+		"invalid", "001",
+	); err != nil {
+		t.Fatalf("failed to introduce checksum drift: %v", err)
+	}
+	if err := q.Down(ctx, 1); !errors.Is(err, queen.ErrChecksumMismatch) {
+		t.Fatalf("Down() with checksum drift error = %v; want ErrChecksumMismatch", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"UPDATE queen_migrations SET checksum = ? WHERE version = ?",
+		checksum, "001",
+	); err != nil {
+		t.Fatalf("failed to restore checksum: %v", err)
 	}
 
 	err = q.Down(ctx, 1)

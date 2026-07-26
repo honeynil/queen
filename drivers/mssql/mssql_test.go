@@ -166,7 +166,7 @@ func TestInit(t *testing.T) {
 		}
 	})
 
-	t.Run("continues when ALTER statements fail (idempotent)", func(t *testing.T) {
+	t.Run("returns ALTER statement errors", func(t *testing.T) {
 		db, mock, err := sqlmock.New()
 		if err != nil {
 			t.Fatalf("failed to create mock: %v", err)
@@ -179,14 +179,13 @@ func TestInit(t *testing.T) {
 		mock.ExpectExec(regexp.QuoteMeta("IF OBJECT_ID(N'queen_migrations', N'U') IS NULL")).
 			WillReturnResult(sqlmock.NewResult(0, 0))
 
-		for i := 0; i < 7; i++ {
-			mock.ExpectExec(regexp.QuoteMeta("IF NOT EXISTS")).
-				WillReturnResult(sqlmock.NewResult(0, 0))
-		}
+		alterErr := errors.New("alter failed")
+		mock.ExpectExec(regexp.QuoteMeta("IF NOT EXISTS")).
+			WillReturnError(alterErr)
 
 		err = driver.Init(ctx)
-		if err != nil {
-			t.Errorf("Init() should not fail even if ALTER statements are ignored: %v", err)
+		if !errors.Is(err, alterErr) {
+			t.Errorf("Init() error = %v; want %v", err, alterErr)
 		}
 
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -518,9 +517,39 @@ func TestUnlock(t *testing.T) {
 		if err == nil {
 			t.Error("Unlock() should return error when sp_releaseapplock fails")
 		}
+		if driver.conn != nil {
+			t.Error("conn should be cleared after failed sp_releaseapplock")
+		}
 
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+
+	t.Run("rejects negative release result and clears connection", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("failed to create mock: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		driver := New(db)
+		ctx := context.Background()
+
+		mock.ExpectQuery(regexp.QuoteMeta("DECLARE @result INT")).
+			WillReturnRows(sqlmock.NewRows([]string{"result"}).AddRow(0))
+		if err := driver.Lock(ctx, time.Second); err != nil {
+			t.Fatalf("Lock() failed: %v", err)
+		}
+
+		mock.ExpectQuery(regexp.QuoteMeta("DECLARE @result INT")).
+			WillReturnRows(sqlmock.NewRows([]string{"result"}).AddRow(-999))
+
+		if err := driver.Unlock(ctx); err == nil {
+			t.Fatal("Unlock() should fail for negative sp_releaseapplock result")
+		}
+		if driver.conn != nil {
+			t.Error("conn should be cleared after negative release result")
 		}
 	})
 

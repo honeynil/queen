@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/yaop-labs/queen"
@@ -18,6 +19,9 @@ type Driver struct {
 	lockTableName string
 	lockKey       string
 	ownerID       string
+	lockMu        sync.Mutex
+	acquiring     bool
+	lockHeld      bool
 }
 
 // New creates a new ClickHouse driver.
@@ -83,7 +87,9 @@ func (d *Driver) Init(ctx context.Context) error {
 	}
 
 	for _, migration := range migrations {
-		_, _ = d.DB.ExecContext(ctx, migration)
+		if _, err := d.DB.ExecContext(ctx, migration); err != nil {
+			return fmt.Errorf("upgrade migration table %q: %w", d.TableName, err)
+		}
 	}
 
 	lockQuery := fmt.Sprintf(`
@@ -104,9 +110,17 @@ func (d *Driver) Init(ctx context.Context) error {
 
 // Lock uses a ClickHouse table as a best-effort migration guard.
 func (d *Driver) Lock(ctx context.Context, timeout time.Duration) error {
+	d.lockMu.Lock()
+	if d.acquiring || d.lockHeld {
+		d.lockMu.Unlock()
+		return fmt.Errorf("%w: lock already held for table '%s'", queen.ErrLockTimeout, d.TableName)
+	}
+	d.acquiring = true
+	d.lockMu.Unlock()
+
 	cfg := base.TableLockConfig{
 		CleanupQuery: fmt.Sprintf(
-			"ALTER TABLE %s DELETE WHERE lock_key = ? AND expires_at < now64(3)",
+			"ALTER TABLE %s DELETE WHERE lock_key = ? AND expires_at < now64(3) SETTINGS mutations_sync = 1",
 			d.Config.QuoteIdentifier(d.lockTableName),
 		),
 		CleanupArgs: func(lockKey string, _ time.Time) []any {
@@ -130,6 +144,13 @@ func (d *Driver) Lock(ctx context.Context, timeout time.Duration) error {
 	}
 
 	err := base.AcquireTableLock(ctx, d.DB, cfg, d.lockKey, d.ownerID, timeout)
+	d.lockMu.Lock()
+	d.acquiring = false
+	if err == nil {
+		d.lockHeld = true
+	}
+	d.lockMu.Unlock()
+
 	if errors.Is(err, queen.ErrLockTimeout) {
 		return fmt.Errorf("%w: failed to acquire lock '%s' for table '%s'",
 			queen.ErrLockTimeout, d.lockKey, d.lockTableName)
@@ -139,8 +160,15 @@ func (d *Driver) Lock(ctx context.Context, timeout time.Duration) error {
 
 // Unlock releases the migration lock.
 func (d *Driver) Unlock(ctx context.Context) error {
+	d.lockMu.Lock()
+	defer d.lockMu.Unlock()
+
+	if !d.lockHeld {
+		return nil
+	}
+
 	unlockQuery := fmt.Sprintf(
-		"ALTER TABLE %s DELETE WHERE lock_key = ? AND owner_id = ?",
+		"ALTER TABLE %s DELETE WHERE lock_key = ? AND owner_id = ? SETTINGS mutations_sync = 1",
 		d.Config.QuoteIdentifier(d.lockTableName),
 	)
 
@@ -149,5 +177,6 @@ func (d *Driver) Unlock(ctx context.Context) error {
 		return fmt.Errorf("failed to release lock '%s' for table '%s': %w",
 			d.lockKey, d.TableName, err)
 	}
-	return err
+	d.lockHeld = false
+	return nil
 }

@@ -4,7 +4,9 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/yaop-labs/queen"
@@ -14,6 +16,7 @@ import (
 // Driver implements the queen.Driver interface for MySQL.
 type Driver struct {
 	base.Driver
+	lockMu   sync.Mutex
 	lockName string
 	conn     *sql.Conn
 }
@@ -79,12 +82,12 @@ func (d *Driver) Init(ctx context.Context) error {
 		checkQuery := `SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
 			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`
 		if err := d.DB.QueryRowContext(ctx, checkQuery, d.TableName, migration.column).Scan(&columnExists); err != nil {
-			continue
+			return fmt.Errorf("check migration metadata column %q: %w", migration.column, err)
 		}
 
 		if columnExists == 0 {
 			if _, err := d.DB.ExecContext(ctx, migration.query); err != nil {
-				continue
+				return fmt.Errorf("add migration metadata column %q: %w", migration.column, err)
 			}
 		}
 	}
@@ -94,15 +97,27 @@ func (d *Driver) Init(ctx context.Context) error {
 
 // Lock acquires a named lock to prevent concurrent migrations.
 func (d *Driver) Lock(ctx context.Context, timeout time.Duration) error {
+	d.lockMu.Lock()
+	defer d.lockMu.Unlock()
+
+	if d.conn != nil {
+		return fmt.Errorf("%w: lock already held for table '%s'", queen.ErrLockTimeout, d.TableName)
+	}
+
 	conn, err := d.DB.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get connection: %w", err)
 	}
 
+	timeoutSeconds := int64(timeout / time.Second)
+	if timeout > 0 && timeout%time.Second != 0 {
+		timeoutSeconds++
+	}
+
 	var result sql.NullInt64
 	query := "SELECT GET_LOCK(?, ?)"
 
-	err = conn.QueryRowContext(ctx, query, d.lockName, int(timeout.Seconds())).Scan(&result)
+	err = conn.QueryRowContext(ctx, query, d.lockName, timeoutSeconds).Scan(&result)
 	if err != nil {
 		_ = conn.Close()
 		return fmt.Errorf("failed to acquire lock: %w", err)
@@ -120,20 +135,46 @@ func (d *Driver) Lock(ctx context.Context, timeout time.Duration) error {
 
 // Unlock releases the migration lock.
 func (d *Driver) Unlock(ctx context.Context) error {
+	d.lockMu.Lock()
+	defer d.lockMu.Unlock()
+
 	if d.conn == nil {
 		return nil
 	}
 
-	var result sql.NullInt64
-	err := d.conn.QueryRowContext(ctx, "SELECT RELEASE_LOCK(?)", d.lockName).Scan(&result)
-
-	if err != nil {
-		return fmt.Errorf("failed to release named lock '%s' for table '%s': %w",
-			d.lockName, d.TableName, err)
-	}
-
-	_ = d.conn.Close()
+	conn := d.conn
 	d.conn = nil
 
-	return nil
+	var result sql.NullInt64
+	releaseErr := conn.QueryRowContext(ctx, "SELECT RELEASE_LOCK(?)", d.lockName).Scan(&result)
+	closeErr := conn.Close()
+
+	if releaseErr != nil {
+		return errors.Join(
+			fmt.Errorf("failed to release named lock '%s' for table '%s': %w", d.lockName, d.TableName, releaseErr),
+			closeErr,
+		)
+	}
+	if !result.Valid || result.Int64 != 1 {
+		return errors.Join(
+			fmt.Errorf("failed to release named lock '%s' for table '%s': lock is not owned by this session",
+				d.lockName, d.TableName),
+			closeErr,
+		)
+	}
+	return closeErr
+}
+
+// Close releases any pinned session connection before closing the pool.
+func (d *Driver) Close() error {
+	d.lockMu.Lock()
+	conn := d.conn
+	d.conn = nil
+	d.lockMu.Unlock()
+
+	var connErr error
+	if conn != nil {
+		connErr = conn.Close()
+	}
+	return errors.Join(connErr, d.DB.Close())
 }

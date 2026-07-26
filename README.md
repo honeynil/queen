@@ -57,10 +57,10 @@ Current stability policy:
 
 Current known limitations:
 
-- SQLite locking is for local/single-process use. Do not rely on it to coordinate multiple migrator processes.
+- SQLite locking coordinates Queen instances only within the current process. Do not rely on it to coordinate multiple migrator processes.
 - ClickHouse locking is best-effort and should be operationally serialized by your deployment system.
-- CockroachDB can return retryable `40001` serialization errors; explicit driver retry handling is still planned.
-- Non-PostgreSQL drivers do not currently record migration metadata in the same transaction as the migration body.
+- CockroachDB retries `40001` serialization failures up to three times. Go-function migration callbacks can therefore run more than once and must be retry-safe.
+- MySQL and ClickHouse record migration metadata separately from the migration body. PostgreSQL, CockroachDB, SQLite, and MSSQL record it in the same transaction.
 
 ## Quick Start
 
@@ -430,11 +430,11 @@ Current release guarantees are intentionally Postgres-first:
 | Database    | Locking guarantee | Migration transaction | Migration record atomic with body |
 |-------------|-------------------|-----------------------|-----------------------------------|
 | PostgreSQL  | Production-ready advisory lock pinned to one connection | Yes | Yes |
-| MySQL       | Uses `GET_LOCK`; supported, less heavily exercised than PostgreSQL | Depends on MySQL DDL semantics | No |
-| SQLite      | Local/single-process use recommended; do not rely on it as a distributed lock | Yes for transactional statements | No |
-| ClickHouse  | Best-effort table lock; not a strong concurrent migrator guarantee | No true transaction support | No |
-| CockroachDB | Table lock path; SERIALIZABLE retry handling is still planned | Yes, but retryable `40001` errors need follow-up handling | No |
-| MSSQL       | Uses application locks; supported, pending extra connection-state hardening | Yes for transactional statements | No |
+| MySQL       | `GET_LOCK` pinned to one connection; the connection is always discarded after release | Depends on MySQL DDL implicit-commit semantics | No |
+| SQLite      | Process-local lock across Queen instances; not a distributed or cross-process lock | Yes for transactional statements | Yes |
+| ClickHouse  | Best-effort table lock with synchronous cleanup; deployment-level serialization is still required | No true transaction support | No |
+| CockroachDB | Table-backed ownership lock | Yes; `40001` serialization failures are retried up to three times | Yes |
+| MSSQL       | Session-owned application lock pinned to one connection | Yes for transactional statements | Yes |
 
 Use PostgreSQL for production environments that require concurrent migrator safety and atomic migration bookkeeping.
 
@@ -515,6 +515,17 @@ Keep exactly one migrator job active per environment. PostgreSQL advisory lockin
 | MSSQL       | `queen/drivers/mssql`       | `github.com/microsoft/go-mssqldb`        | SQL Server 2022    |
 
 The table lists what Queen's integration tests exercise today; it is not a formal minimum-version matrix for every database. PostgreSQL 15 is the primary release target.
+
+Run the same driver-specific suites used by CI with:
+
+```bash
+make test-postgres
+make test-mysql
+make test-sqlite
+make test-cockroachdb
+make test-clickhouse
+make test-mssql
+```
 
 ## Documentation
 

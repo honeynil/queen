@@ -4,7 +4,9 @@ package mssql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +22,8 @@ type Driver struct {
 	lockName string
 	conn     *sql.Conn
 }
+
+var _ queen.TransactionalRecorder = (*Driver)(nil)
 
 // New creates a new MS SQL Server driver.
 func New(db *sql.DB) *Driver {
@@ -89,7 +93,9 @@ func (d *Driver) Init(ctx context.Context) error {
 	}
 
 	for _, migration := range migrations {
-		_, _ = d.DB.ExecContext(ctx, migration.query)
+		if _, err := d.DB.ExecContext(ctx, migration.query); err != nil {
+			return fmt.Errorf("add migration metadata column %q: %w", migration.column, err)
+		}
 	}
 
 	return nil
@@ -113,6 +119,14 @@ func (d *Driver) Lock(ctx context.Context, timeout time.Duration) error {
 		return fmt.Errorf("failed to get connection: %w", err)
 	}
 
+	timeoutMS := timeout.Milliseconds()
+	if timeoutMS < 0 {
+		timeoutMS = 0
+	}
+	if timeoutMS > math.MaxInt32 {
+		timeoutMS = math.MaxInt32
+	}
+
 	var result int
 	query := `
 		DECLARE @result INT;
@@ -126,7 +140,7 @@ func (d *Driver) Lock(ctx context.Context, timeout time.Duration) error {
 
 	err = conn.QueryRowContext(ctx, query,
 		sql.Named("p1", d.lockName),
-		sql.Named("p2", int(timeout.Milliseconds())),
+		sql.Named("p2", int(timeoutMS)),
 	).Scan(&result)
 	if err != nil {
 		_ = conn.Close()
@@ -164,6 +178,7 @@ func (d *Driver) Unlock(ctx context.Context) error {
 	}
 
 	conn := d.conn
+	d.conn = nil
 	var result int
 	query := `
 		DECLARE @result INT;
@@ -173,14 +188,44 @@ func (d *Driver) Unlock(ctx context.Context) error {
 		SELECT @result;
 	`
 
-	err := conn.QueryRowContext(ctx, query, sql.Named("p1", d.lockName)).Scan(&result)
-	if err != nil {
-		return fmt.Errorf("failed to release lock '%s' for table '%s': %w",
-			d.lockName, d.TableName, err)
+	releaseErr := conn.QueryRowContext(ctx, query, sql.Named("p1", d.lockName)).Scan(&result)
+	closeErr := conn.Close()
+
+	if releaseErr != nil {
+		return errors.Join(
+			fmt.Errorf("failed to release lock '%s' for table '%s': %w", d.lockName, d.TableName, releaseErr),
+			closeErr,
+		)
 	}
+	if result < 0 {
+		return errors.Join(
+			fmt.Errorf("failed to release lock '%s' for table '%s' (code: %d)", d.lockName, d.TableName, result),
+			closeErr,
+		)
+	}
+	return closeErr
+}
 
-	_ = conn.Close()
+// RecordTx records a migration in the transaction used for its body.
+func (d *Driver) RecordTx(ctx context.Context, tx *sql.Tx, m *queen.Migration, meta *queen.MigrationMetadata) error {
+	return base.RecordTx(ctx, &d.Driver, tx, m, meta)
+}
+
+// RemoveTx removes a migration record in the transaction used for rollback.
+func (d *Driver) RemoveTx(ctx context.Context, tx *sql.Tx, version string) error {
+	return base.RemoveTx(ctx, &d.Driver, tx, version)
+}
+
+// Close releases any pinned session connection before closing the pool.
+func (d *Driver) Close() error {
+	d.lockMu.Lock()
+	conn := d.conn
 	d.conn = nil
+	d.lockMu.Unlock()
 
-	return nil
+	var connErr error
+	if conn != nil {
+		connErr = conn.Close()
+	}
+	return errors.Join(connErr, d.DB.Close())
 }

@@ -5,6 +5,7 @@ package clickhouse_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -101,6 +102,34 @@ func TestClickHouseIntegration_BasicMigration(t *testing.T) {
 
 	if !helpers.TableExists(t, db, "users") {
 		t.Error("users table should exist after migration")
+	}
+
+	var action, status, checksum string
+	err = db.QueryRowContext(ctx,
+		"SELECT action, status, checksum FROM queen_migrations FINAL WHERE version = ?",
+		"001",
+	).Scan(&action, &status, &checksum)
+	if err != nil {
+		t.Fatalf("failed to read migration metadata: %v", err)
+	}
+	if action != "apply" || status != "success" {
+		t.Fatalf("migration metadata = action %q, status %q; want apply/success", action, status)
+	}
+
+	if _, err := db.ExecContext(ctx,
+		"ALTER TABLE queen_migrations UPDATE checksum = ? WHERE version = ? SETTINGS mutations_sync = 1",
+		"invalid", "001",
+	); err != nil {
+		t.Fatalf("failed to introduce checksum drift: %v", err)
+	}
+	if err := q.Down(ctx, 1); !errors.Is(err, queen.ErrChecksumMismatch) {
+		t.Fatalf("Down() with checksum drift error = %v; want ErrChecksumMismatch", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"ALTER TABLE queen_migrations UPDATE checksum = ? WHERE version = ? SETTINGS mutations_sync = 1",
+		checksum, "001",
+	); err != nil {
+		t.Fatalf("failed to restore checksum: %v", err)
 	}
 
 	err = q.Down(ctx, 1)

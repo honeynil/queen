@@ -12,6 +12,11 @@ import (
 	"github.com/yaop-labs/queen/drivers/base"
 )
 
+const (
+	maxTransactionRetries = 3
+	initialRetryBackoff   = 10 * time.Millisecond
+)
+
 // Driver implements the queen.Driver interface for CockroachDB.
 type Driver struct {
 	base.Driver
@@ -19,6 +24,8 @@ type Driver struct {
 	lockKey       string
 	ownerID       string
 }
+
+var _ queen.TransactionalRecorder = (*Driver)(nil)
 
 // New creates a new CockroachDB driver.
 func New(db *sql.DB) (*Driver, error) {
@@ -81,7 +88,9 @@ func (d *Driver) Init(ctx context.Context) error {
 	}
 
 	for _, migration := range migrations {
-		_, _ = d.DB.ExecContext(ctx, migration)
+		if _, err := d.DB.ExecContext(ctx, migration); err != nil {
+			return fmt.Errorf("upgrade migration table %q: %w", d.TableName, err)
+		}
 	}
 
 	lockQuery := fmt.Sprintf(`
@@ -115,6 +124,10 @@ func (d *Driver) Lock(ctx context.Context, timeout time.Duration) error {
 			"INSERT INTO %s (lock_key, expires_at, owner_id) VALUES ($1, $2, $3)",
 			d.Config.QuoteIdentifier(d.lockTableName),
 		),
+		RetryableInsertError: func(err error) bool {
+			var stateErr sqlStateError
+			return errors.As(err, &stateErr) && stateErr.SQLState() == "23505"
+		},
 		ScanFunc: func(row *sql.Row) (bool, error) {
 			var exists int
 			err := row.Scan(&exists)
@@ -146,6 +159,70 @@ func (d *Driver) Unlock(ctx context.Context) error {
 			d.lockKey, d.TableName, err)
 	}
 	return err
+}
+
+// Exec executes fn in a transaction and retries CockroachDB serialization
+// failures. Callbacks can run more than once and must therefore be retry-safe.
+func (d *Driver) Exec(ctx context.Context, isolationLevel sql.IsolationLevel, fn func(*sql.Tx) error) error {
+	backoff := initialRetryBackoff
+
+	for attempt := 0; ; attempt++ {
+		err := d.execOnce(ctx, isolationLevel, fn)
+		if !isRetryableSerializationError(err) || attempt >= maxTransactionRetries {
+			return err
+		}
+
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+		backoff *= 2
+	}
+}
+
+func (d *Driver) execOnce(ctx context.Context, isolationLevel sql.IsolationLevel, fn func(*sql.Tx) error) error {
+	tx, err := d.DB.BeginTx(ctx, &sql.TxOptions{Isolation: isolationLevel})
+	if err != nil {
+		return err
+	}
+
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return nil
+}
+
+type sqlStateError interface {
+	SQLState() string
+}
+
+func isRetryableSerializationError(err error) bool {
+	var stateErr sqlStateError
+	return errors.As(err, &stateErr) && stateErr.SQLState() == "40001"
+}
+
+// RecordTx records a migration in the transaction used for its body.
+func (d *Driver) RecordTx(ctx context.Context, tx *sql.Tx, m *queen.Migration, meta *queen.MigrationMetadata) error {
+	return base.RecordTx(ctx, &d.Driver, tx, m, meta)
+}
+
+// RemoveTx removes a migration record in the transaction used for rollback.
+func (d *Driver) RemoveTx(ctx context.Context, tx *sql.Tx, version string) error {
+	return base.RemoveTx(ctx, &d.Driver, tx, version)
 }
 
 // QuoteIdentifier quotes a SQL identifier.

@@ -17,6 +17,18 @@ import (
 
 const CockroachTestDSN = "postgresql://root@localhost:26257/defaultdb?sslmode=disable"
 
+type testSQLStateError struct {
+	state string
+}
+
+func (e testSQLStateError) Error() string {
+	return "sqlstate " + e.state
+}
+
+func (e testSQLStateError) SQLState() string {
+	return e.state
+}
+
 // TestInitUnit tests Init using sqlmock
 func TestInitUnit(t *testing.T) {
 	t.Run("creates migrations table successfully", func(t *testing.T) {
@@ -82,7 +94,7 @@ func TestInitUnit(t *testing.T) {
 		}
 	})
 
-	t.Run("continues on ALTER TABLE errors (idempotent)", func(t *testing.T) {
+	t.Run("returns ALTER TABLE errors", func(t *testing.T) {
 		db, mock, err := sqlmock.New()
 		if err != nil {
 			t.Fatalf("failed to create mock: %v", err)
@@ -99,19 +111,13 @@ func TestInitUnit(t *testing.T) {
 		mock.ExpectExec(`CREATE TABLE IF NOT EXISTS "queen_migrations"`).
 			WillReturnResult(sqlmock.NewResult(0, 0))
 
-		// ALTER TABLE statements can fail (e.g., column already exists)
-		// The driver should continue and not return error
-		for i := 0; i < 7; i++ {
-			mock.ExpectExec(`ALTER TABLE "queen_migrations" ADD COLUMN`).
-				WillReturnError(errors.New("column already exists"))
-		}
-
-		mock.ExpectExec(`CREATE TABLE IF NOT EXISTS "queen_migrations_lock"`).
-			WillReturnResult(sqlmock.NewResult(0, 0))
+		alterErr := errors.New("alter failed")
+		mock.ExpectExec(`ALTER TABLE "queen_migrations" ADD COLUMN`).
+			WillReturnError(alterErr)
 
 		err = driver.Init(ctx)
-		if err != nil {
-			t.Errorf("Init() should not fail on ALTER errors: %v", err)
+		if !errors.Is(err, alterErr) {
+			t.Errorf("Init() error = %v; want %v", err, alterErr)
 		}
 
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -415,6 +421,73 @@ func TestConfigurationValuesUnit(t *testing.T) {
 
 	if driver.Config.ParseTime != nil {
 		t.Error("ParseTime should be nil")
+	}
+}
+
+func TestExecRetriesSerializationFailures(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	driver, err := New(db)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectRollback()
+	mock.ExpectBegin()
+	mock.ExpectCommit()
+
+	calls := 0
+	err = driver.Exec(context.Background(), sql.LevelSerializable, func(_ *sql.Tx) error {
+		calls++
+		if calls == 1 {
+			return testSQLStateError{state: "40001"}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Exec() failed after retry: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("callback calls = %d; want 2", calls)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+func TestExecDoesNotRetryOtherErrors(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	driver, err := New(db)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectRollback()
+
+	calls := 0
+	err = driver.Exec(context.Background(), sql.LevelSerializable, func(_ *sql.Tx) error {
+		calls++
+		return testSQLStateError{state: "23505"}
+	})
+	if err == nil {
+		t.Fatal("Exec() should return non-retryable error")
+	}
+	if calls != 1 {
+		t.Fatalf("callback calls = %d; want 1", calls)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
 	}
 }
 

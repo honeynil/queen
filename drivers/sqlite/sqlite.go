@@ -5,17 +5,29 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
+	"sync"
 	"time"
 
 	"github.com/yaop-labs/queen"
 	"github.com/yaop-labs/queen/drivers/base"
 )
 
+type processLock struct {
+	token chan struct{}
+}
+
+var processLocks sync.Map
+
 // Driver implements the queen.Driver interface for SQLite.
 type Driver struct {
 	base.Driver
+	lockMu    sync.Mutex
+	lock      *processLock
+	acquiring bool
+	lockHeld  bool
 }
+
+var _ queen.TransactionalRecorder = (*Driver)(nil)
 
 // New creates a new SQLite driver.
 func New(db *sql.DB) *Driver {
@@ -24,6 +36,8 @@ func New(db *sql.DB) *Driver {
 
 // NewWithTableName creates a new SQLite driver with a custom table name.
 func NewWithTableName(db *sql.DB, tableName string) *Driver {
+	lockValue, _ := processLocks.LoadOrStore(tableName, newProcessLock())
+
 	return &Driver{
 		Driver: base.Driver{
 			DB:        db,
@@ -34,7 +48,14 @@ func NewWithTableName(db *sql.DB, tableName string) *Driver {
 				ParseTime:       base.ParseTimeISO8601,
 			},
 		},
+		lock: lockValue.(*processLock),
 	}
+}
+
+func newProcessLock() *processLock {
+	lock := &processLock{token: make(chan struct{}, 1)}
+	lock.token <- struct{}{}
+	return lock
 }
 
 // Init creates the migrations tracking table if it doesn't exist.
@@ -59,71 +80,101 @@ func (d *Driver) Init(ctx context.Context) error {
 		return err
 	}
 
-	migrations := []string{
-		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN applied_by TEXT`, d.Config.QuoteIdentifier(d.TableName)),
-		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN duration_ms INTEGER`, d.Config.QuoteIdentifier(d.TableName)),
-		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN hostname TEXT`, d.Config.QuoteIdentifier(d.TableName)),
-		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN environment TEXT`, d.Config.QuoteIdentifier(d.TableName)),
-		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN action TEXT DEFAULT 'apply'`, d.Config.QuoteIdentifier(d.TableName)),
-		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN status TEXT DEFAULT 'success'`, d.Config.QuoteIdentifier(d.TableName)),
-		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN error_message TEXT`, d.Config.QuoteIdentifier(d.TableName)),
+	migrations := []struct {
+		column string
+		query  string
+	}{
+		{"applied_by", fmt.Sprintf(`ALTER TABLE %s ADD COLUMN applied_by TEXT`, d.Config.QuoteIdentifier(d.TableName))},
+		{"duration_ms", fmt.Sprintf(`ALTER TABLE %s ADD COLUMN duration_ms INTEGER`, d.Config.QuoteIdentifier(d.TableName))},
+		{"hostname", fmt.Sprintf(`ALTER TABLE %s ADD COLUMN hostname TEXT`, d.Config.QuoteIdentifier(d.TableName))},
+		{"environment", fmt.Sprintf(`ALTER TABLE %s ADD COLUMN environment TEXT`, d.Config.QuoteIdentifier(d.TableName))},
+		{"action", fmt.Sprintf(`ALTER TABLE %s ADD COLUMN action TEXT DEFAULT 'apply'`, d.Config.QuoteIdentifier(d.TableName))},
+		{"status", fmt.Sprintf(`ALTER TABLE %s ADD COLUMN status TEXT DEFAULT 'success'`, d.Config.QuoteIdentifier(d.TableName))},
+		{"error_message", fmt.Sprintf(`ALTER TABLE %s ADD COLUMN error_message TEXT`, d.Config.QuoteIdentifier(d.TableName))},
 	}
 
 	for _, migration := range migrations {
-		_, _ = d.DB.ExecContext(ctx, migration)
+		var columnExists int
+		err := d.DB.QueryRowContext(
+			ctx,
+			`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`,
+			d.TableName,
+			migration.column,
+		).Scan(&columnExists)
+		if err != nil {
+			return fmt.Errorf("check migration metadata column %q: %w", migration.column, err)
+		}
+		if columnExists == 0 {
+			if _, err := d.DB.ExecContext(ctx, migration.query); err != nil {
+				return fmt.Errorf("add migration metadata column %q: %w", migration.column, err)
+			}
+		}
 	}
 
 	return nil
 }
 
-// Lock uses SQLite's busy timeout and immediate transaction path.
-// It is intended for local SQLite use, not distributed coordination.
+// Lock serializes Queen instances in the current process. SQLite still provides
+// transaction-level database locking; this lock is not cross-process.
 func (d *Driver) Lock(ctx context.Context, timeout time.Duration) error {
-	_, err := d.DB.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout = %d", timeout.Milliseconds()))
-	if err != nil {
-		return fmt.Errorf("failed to set busy_timeout: %w", err)
+	d.lockMu.Lock()
+	if d.acquiring || d.lockHeld {
+		d.lockMu.Unlock()
+		return fmt.Errorf("%w: lock already held for table '%s'", queen.ErrLockTimeout, d.TableName)
 	}
+	d.acquiring = true
+	d.lockMu.Unlock()
 
-	_, err = d.DB.ExecContext(ctx, "PRAGMA locking_mode = EXCLUSIVE")
-	if err != nil {
-		return fmt.Errorf("failed to set locking mode: %w", err)
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		d.lockMu.Lock()
+		d.acquiring = false
+		d.lockMu.Unlock()
+		return ctx.Err()
+	case <-timer.C:
+		d.lockMu.Lock()
+		d.acquiring = false
+		d.lockMu.Unlock()
+		return fmt.Errorf("%w: failed to acquire process-local lock for table '%s'",
+			queen.ErrLockTimeout, d.TableName)
+	case <-d.lock.token:
+		d.lockMu.Lock()
+		d.acquiring = false
+		d.lockHeld = true
+		d.lockMu.Unlock()
+		return nil
 	}
-
-	_, err = d.DB.ExecContext(ctx, "BEGIN IMMEDIATE")
-	if err != nil {
-		if strings.Contains(err.Error(), "database is locked") {
-			return fmt.Errorf("%w: failed to acquire exclusive lock for table '%s'",
-				queen.ErrLockTimeout, d.TableName)
-		}
-		return fmt.Errorf("failed to begin immediate transaction: %w", err)
-	}
-
-	_, err = d.DB.ExecContext(ctx, "COMMIT")
-	if err != nil {
-		return fmt.Errorf("failed to commit lock transaction: %w", err)
-	}
-
-	return nil
 }
 
 // Unlock releases the migration lock.
-func (d *Driver) Unlock(ctx context.Context) error {
-	_, err := d.DB.ExecContext(ctx, "PRAGMA locking_mode = NORMAL")
-	if err != nil {
-		return fmt.Errorf("failed to reset locking mode for table '%s': %w",
-			d.TableName, err)
+func (d *Driver) Unlock(_ context.Context) error {
+	d.lockMu.Lock()
+	defer d.lockMu.Unlock()
+
+	if !d.lockHeld {
+		return nil
 	}
 
-	tx, err := d.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin unlock transaction for table '%s': %w",
-			d.TableName, err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit unlock transaction for table '%s': %w",
-			d.TableName, err)
-	}
-
+	d.lockHeld = false
+	d.lock.token <- struct{}{}
 	return nil
+}
+
+// RecordTx records a migration in the transaction used for its body.
+func (d *Driver) RecordTx(ctx context.Context, tx *sql.Tx, m *queen.Migration, meta *queen.MigrationMetadata) error {
+	return base.RecordTx(ctx, &d.Driver, tx, m, meta)
+}
+
+// RemoveTx removes a migration record in the transaction used for rollback.
+func (d *Driver) RemoveTx(ctx context.Context, tx *sql.Tx, version string) error {
+	return base.RemoveTx(ctx, &d.Driver, tx, version)
+}
+
+// Close releases a held process-local lock before closing the database.
+func (d *Driver) Close() error {
+	_ = d.Unlock(context.Background())
+	return d.DB.Close()
 }

@@ -144,6 +144,11 @@ func TestInit_Unit(t *testing.T) {
 		mock.ExpectExec(regexp.QuoteMeta("CREATE TABLE IF NOT EXISTS")).
 			WillReturnResult(sqlmock.NewResult(0, 0))
 
+		for i := 0; i < 7; i++ {
+			mock.ExpectExec(regexp.QuoteMeta("ALTER TABLE")).
+				WillReturnResult(sqlmock.NewResult(0, 0))
+		}
+
 		// Expect CREATE TABLE for lock table
 		mock.ExpectExec(regexp.QuoteMeta("CREATE TABLE IF NOT EXISTS")).
 			WillReturnResult(sqlmock.NewResult(0, 0))
@@ -247,7 +252,7 @@ func TestLock_Unit(t *testing.T) {
 			WithArgs("migration_lock").
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(int64(1)))
 
-		err = driver.Lock(ctx, 100*time.Millisecond)
+		err = driver.Lock(ctx, 10*time.Millisecond)
 		if !errors.Is(err, queen.ErrLockTimeout) {
 			t.Errorf("Lock() error = %v; want ErrLockTimeout", err)
 		}
@@ -299,6 +304,7 @@ func TestUnlock_Unit(t *testing.T) {
 			t.Fatalf("New() failed: %v", err)
 		}
 		ctx := context.Background()
+		driver.lockHeld = true
 
 		mock.ExpectExec(regexp.QuoteMeta("ALTER TABLE")).
 			WithArgs("migration_lock", driver.ownerID).
@@ -327,6 +333,7 @@ func TestUnlock_Unit(t *testing.T) {
 			t.Fatalf("New() failed: %v", err)
 		}
 		ctx := context.Background()
+		driver.lockHeld = true
 
 		unlockErr := errors.New("delete lock failed")
 		mock.ExpectExec(regexp.QuoteMeta("ALTER TABLE")).
@@ -341,7 +348,7 @@ func TestUnlock_Unit(t *testing.T) {
 
 	t.Run("gracefully handles unlock when not locked", func(t *testing.T) {
 		t.Parallel()
-		db, mock, err := sqlmock.New()
+		db, _, err := sqlmock.New()
 		if err != nil {
 			t.Fatalf("failed to create mock: %v", err)
 		}
@@ -353,17 +360,9 @@ func TestUnlock_Unit(t *testing.T) {
 		}
 		ctx := context.Background()
 
-		mock.ExpectExec(regexp.QuoteMeta("ALTER TABLE")).
-			WithArgs("migration_lock", driver.ownerID).
-			WillReturnResult(sqlmock.NewResult(0, 0))
-
 		err = driver.Unlock(ctx)
 		if err != nil {
 			t.Errorf("Unlock() should be graceful when no lock exists, got error: %v", err)
-		}
-
-		if err := mock.ExpectationsWereMet(); err != nil {
-			t.Errorf("unfulfilled expectations: %v", err)
 		}
 	})
 }

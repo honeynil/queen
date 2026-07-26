@@ -5,6 +5,7 @@ package sqlite_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -61,6 +62,34 @@ func TestSQLiteIntegration_BasicMigration(t *testing.T) {
 
 	if len(statuses) != 1 {
 		t.Fatalf("expected 1 migration status, got %d", len(statuses))
+	}
+
+	var action, status, checksum string
+	err = db.QueryRowContext(ctx,
+		"SELECT action, status, checksum FROM queen_migrations WHERE version = ?",
+		"001",
+	).Scan(&action, &status, &checksum)
+	if err != nil {
+		t.Fatalf("failed to read migration metadata: %v", err)
+	}
+	if action != "apply" || status != "success" {
+		t.Fatalf("migration metadata = action %q, status %q; want apply/success", action, status)
+	}
+
+	if _, err := db.ExecContext(ctx,
+		"UPDATE queen_migrations SET checksum = ? WHERE version = ?",
+		"invalid", "001",
+	); err != nil {
+		t.Fatalf("failed to introduce checksum drift: %v", err)
+	}
+	if err := q.Down(ctx, 1); !errors.Is(err, queen.ErrChecksumMismatch) {
+		t.Fatalf("Down() with checksum drift error = %v; want ErrChecksumMismatch", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"UPDATE queen_migrations SET checksum = ? WHERE version = ?",
+		checksum, "001",
+	); err != nil {
+		t.Fatalf("failed to restore checksum: %v", err)
 	}
 
 	err = q.Down(ctx, 1)
@@ -225,13 +254,11 @@ func TestSQLiteIntegration_TransactionRollback(t *testing.T) {
 
 	q.MustAdd(queen.M{
 		Version: "002",
-		Name:    "migration_with_error",
+		Name:    "record_failure_rolls_back_body",
 		UpSQL: `
+			DROP TABLE queen_migrations;
 			CREATE TABLE test_table (id INTEGER PRIMARY KEY);
 			INSERT INTO test_table VALUES (1);
-			-- This will fail - syntax error
-			INVALID SQL STATEMENT;
-			INSERT INTO test_table VALUES (2);
 		`,
 		DownSQL: `DROP TABLE IF EXISTS test_table`,
 	})
@@ -243,11 +270,11 @@ func TestSQLiteIntegration_TransactionRollback(t *testing.T) {
 
 	err = q.UpSteps(ctx, 1)
 	if err == nil {
-		t.Fatal("expected error when applying migration with invalid SQL")
+		t.Fatal("expected migration record failure")
 	}
 
 	if helpers.TableExists(t, db, "test_table") {
-		t.Error("test_table should not exist after failed migration (transaction rollback)")
+		t.Error("migration body should roll back when its record cannot be written")
 	}
 
 	statuses, err := q.Status(ctx)

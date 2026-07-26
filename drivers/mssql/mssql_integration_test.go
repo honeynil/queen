@@ -5,6 +5,7 @@ package mssql_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -75,6 +76,18 @@ func TestMSSQLIntegration_BasicMigration(t *testing.T) {
 
 	ctx := context.Background()
 	driver := mssql.New(db)
+	competitor := mssql.New(db)
+
+	if err := driver.Lock(ctx, time.Second); err != nil {
+		t.Fatalf("failed to acquire application lock: %v", err)
+	}
+	if err := competitor.Lock(ctx, 20*time.Millisecond); !errors.Is(err, queen.ErrLockTimeout) {
+		t.Fatalf("competing Lock() error = %v; want ErrLockTimeout", err)
+	}
+	if err := driver.Unlock(ctx); err != nil {
+		t.Fatalf("failed to release application lock: %v", err)
+	}
+
 	q := queen.New(driver)
 
 	q.MustAdd(queen.M{
@@ -97,6 +110,34 @@ func TestMSSQLIntegration_BasicMigration(t *testing.T) {
 
 	if !helpers.TableExists(t, db, "users") {
 		t.Error("users table should exist after migration")
+	}
+
+	var action, status, checksum string
+	err = db.QueryRowContext(ctx,
+		"SELECT action, status, checksum FROM queen_migrations WHERE version = @p1",
+		"001",
+	).Scan(&action, &status, &checksum)
+	if err != nil {
+		t.Fatalf("failed to read migration metadata: %v", err)
+	}
+	if action != "apply" || status != "success" {
+		t.Fatalf("migration metadata = action %q, status %q; want apply/success", action, status)
+	}
+
+	if _, err := db.ExecContext(ctx,
+		"UPDATE queen_migrations SET checksum = @p1 WHERE version = @p2",
+		"invalid", "001",
+	); err != nil {
+		t.Fatalf("failed to introduce checksum drift: %v", err)
+	}
+	if err := q.Down(ctx, 1); !errors.Is(err, queen.ErrChecksumMismatch) {
+		t.Fatalf("Down() with checksum drift error = %v; want ErrChecksumMismatch", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"UPDATE queen_migrations SET checksum = @p1 WHERE version = @p2",
+		checksum, "001",
+	); err != nil {
+		t.Fatalf("failed to restore checksum: %v", err)
 	}
 
 	err = q.Down(ctx, 1)
@@ -193,31 +234,24 @@ func TestMSSQLIntegration_TransactionRollback(t *testing.T) {
 		t.Fatalf("failed to apply first migration: %v", err)
 	}
 
-	// Note: MSSQL DDL (CREATE TABLE, DROP TABLE) auto-commits and cannot be rolled back
-	// So we test rollback with DML operations instead
 	q.MustAdd(queen.M{
 		Version: "002",
-		Name:    "insert_with_error",
+		Name:    "record_failure_rolls_back_body",
 		UpSQL: `
-			INSERT INTO users (name) VALUES ('User 1');
-			INSERT INTO users (name) VALUES ('User 2');
-			-- This will fail - syntax error, should rollback INSERTs
-			INVALID SQL STATEMENT HERE;
-			INSERT INTO users (name) VALUES ('User 3');
+			DROP TABLE queen_migrations;
+			CREATE TABLE test_table (id INT PRIMARY KEY);
+			INSERT INTO test_table VALUES (1);
 		`,
-		DownSQL: `DELETE FROM users WHERE name IN ('User 1', 'User 2', 'User 3')`,
+		DownSQL: `DROP TABLE IF EXISTS test_table`,
 	})
 
-	// Try to apply second migration (should fail and rollback)
 	err = q.UpSteps(ctx, 1)
 	if err == nil {
-		t.Fatal("expected error when applying migration with invalid SQL")
+		t.Fatal("expected migration record failure")
 	}
 
-	// Verify that INSERTs were rolled back (no users should be inserted)
-	count := helpers.CountRows(t, db, "users")
-	if count != 0 {
-		t.Errorf("expected 0 rows after failed migration rollback, got %d", count)
+	if helpers.TableExists(t, db, "test_table") {
+		t.Error("migration body should roll back when its record cannot be written")
 	}
 
 	statuses, err := q.Status(ctx)
