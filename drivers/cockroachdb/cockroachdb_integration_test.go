@@ -218,18 +218,11 @@ func TestCockroachDBIntegration_TransactionRollback(t *testing.T) {
 
 	q.MustAdd(helpers.TestMigration001)
 
-	// Force RecordTx to fail without dropping the metadata table: CockroachDB
-	// does not guarantee atomic DROP TABLE in a multi-statement transaction.
 	q.MustAdd(queen.M{
 		Version: "002",
 		Name:    "record_failure_rolls_back_body",
-		UpSQL: `
-			CREATE TABLE test_table (id INT PRIMARY KEY);
-			INSERT INTO test_table VALUES (1);
-			INSERT INTO queen_migrations (version, name, checksum)
-			VALUES ('002', 'force_record_collision', 'test');
-		`,
-		DownSQL: `DROP TABLE IF EXISTS test_table`,
+		UpSQL:   `INSERT INTO test_table VALUES (1)`,
+		DownSQL: `DELETE FROM test_table WHERE id = 1`,
 	})
 
 	err = q.UpSteps(ctx, 1)
@@ -237,13 +230,24 @@ func TestCockroachDBIntegration_TransactionRollback(t *testing.T) {
 		t.Fatalf("failed to apply first migration: %v", err)
 	}
 
+	if _, err := db.ExecContext(ctx, "CREATE TABLE test_table (id INT PRIMARY KEY)"); err != nil {
+		t.Fatalf("failed to create transaction test table: %v", err)
+	}
+	// Reject the metadata write after the migration body has completed.
+	if _, err := db.ExecContext(ctx, `
+		ALTER TABLE queen_migrations
+		ADD CONSTRAINT reject_version_002 CHECK (version <> '002')
+	`); err != nil {
+		t.Fatalf("failed to install migration record guard: %v", err)
+	}
+
 	err = q.UpSteps(ctx, 1)
 	if err == nil {
 		t.Fatal("expected migration record failure")
 	}
 
-	if helpers.TableExists(t, db, "test_table") {
-		t.Error("migration body should roll back when its record cannot be written")
+	if count := helpers.CountRows(t, db, "test_table"); count != 0 {
+		t.Errorf("expected migration body to roll back, got %d rows", count)
 	}
 
 	var failedRecordCount int
